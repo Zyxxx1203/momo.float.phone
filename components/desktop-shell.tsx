@@ -907,6 +907,16 @@ function measureTextareaCaretRect(textarea: HTMLTextAreaElement): KeyboardTarget
 }
 
 function getKeyboardTargetRect(element: HTMLElement): KeyboardTargetRect {
+  // 聊天输入栏 / 多选栏是“上输入框、下发送按钮”的竖向结构。
+  // 抬高的目标必须是整条栏子的 bottom（含发送按钮），而不是文字光标那一行，
+  // 否则只把输入框顶部抬到键盘上方、发送按钮仍被键盘盖住。
+  const inputBar = element.closest<HTMLElement>("[data-ui='input'], [data-ui='multi-select']");
+  if (inputBar) {
+    const rect = inputBar.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom };
+  }
+
+  // 其它独立输入框（设置项、文件夹重命名等）没有底部按钮，仍按原逻辑抬光标。
   if (element instanceof HTMLTextAreaElement) {
     return measureTextareaCaretRect(element);
   }

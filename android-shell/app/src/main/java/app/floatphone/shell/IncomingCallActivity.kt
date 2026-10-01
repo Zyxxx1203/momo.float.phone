@@ -1,268 +1,138 @@
 package app.floatphone.shell
 
-import android.Manifest
-import android.annotation.SuppressLint
-import android.app.DownloadManager
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.media.AudioManager
-import android.net.Uri
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.Settings
-import android.webkit.CookieManager
-import android.webkit.DownloadListener
-import android.webkit.JavascriptInterface
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.Toast
-import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.contract.ActivityResultContracts
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 
 /**
- * Float 小手机安卓壳：全屏 WebView 直接加载线上站点。
- * 网页每次部署即时生效，本壳只负责原生能力（推送长连接、文件上下行、外链）。
+ * 锁屏全屏来电页（full-screen intent 的落地页）：
+ * 纯代码构建 UI（省掉布局资源），角色名 + "语音来电…" + 拒接/接听。
+ * 接听 → 收掉振动通知，拉起 MainActivity 带 #incoming-call 深链进通话；
+ * 拒接/返回 → 只收场，正文消息照常躺在聊天里。
  */
-class MainActivity : AppCompatActivity() {
+class IncomingCallActivity : AppCompatActivity() {
 
     companion object {
-        val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.0"
-        /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
-        const val EXTRA_OPEN_URL = "open_url"
+        const val EXTRA_SESSION_ID = "session_id"
+        const val EXTRA_CHARACTER_NAME = "character_name"
+        const val EXTRA_CALL_TS = "call_ts"
     }
 
-    private lateinit var webView: WebView
-    private var filePathCallback: ValueCallback<Array<Uri>>? = null
-
-    private val fileChooserLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val callback = filePathCallback ?: return@registerForActivityResult
-        filePathCallback = null
-        val data = result.data?.data
-        callback.onReceiveValue(if (data != null) arrayOf(data) else emptyArray())
-    }
-
-    private val notifPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) PushService.start(this)
-    }
-
-    // 网页侧 getUserMedia（通话按住说话、语音条录音、视频通话摄像头）触发的
-    // WebView 权限请求：先要系统运行时权限，拿到后再转授给页面。
-    // 不实现 onPermissionRequest 时 WebView 会静默拒绝，页面永远拿不到麦克风。
-    private var pendingWebPermissionRequest: android.webkit.PermissionRequest? = null
-
-    private val webPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ ->
-        val request = pendingWebPermissionRequest ?: return@registerForActivityResult
-        pendingWebPermissionRequest = null
-        val granted = request.resources.filter { resource ->
-            webResourcePermissions(resource).all {
-                ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-            }
-        }
-        if (granted.isEmpty()) request.deny() else request.grant(granted.toTypedArray())
-    }
-
-    private fun webResourcePermissions(resource: String): List<String> = when (resource) {
-        android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE -> listOf(Manifest.permission.RECORD_AUDIO)
-        android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE -> listOf(Manifest.permission.CAMERA)
-        else -> emptyList()
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, true)
-        hideSystemStatusBar()
-        // 音量键默认调媒体流：WebView 里的语音条/TTS 都走媒体流播放，
-        // 不设的话短音频没在播时按键调的是铃声，用户感觉"音量键无效、声音巨大"
-        volumeControlStream = AudioManager.STREAM_MUSIC
-
-        webView = WebView(this)
-        setContentView(webView)
-
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            mediaPlaybackRequiresUserGesture = false
-            allowFileAccess = false
-            userAgentString = "$userAgentString FloatShell/$VERSION"
-        }
-        CookieManager.getInstance().setAcceptCookie(true)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
-
-        webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val url = request.url
-                val scheme = url.scheme ?: return false
-                // 站内导航留在壳里；http(s) 外链和自定义协议（shortcuts:// 等）交给系统
-                if (scheme == "http" || scheme == "https") {
-                    if (url.host == Uri.parse(SITE_URL).host) return false
-                    return runCatching {
-                        startActivity(Intent(Intent.ACTION_VIEW, url)); true
-                    }.getOrDefault(true)
-                }
-                return runCatching {
-                    startActivity(Intent(Intent.ACTION_VIEW, url)); true
-                }.getOrDefault(true)
-            }
-        }
-
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
-                val supported = request.resources.filter { webResourcePermissions(it).isNotEmpty() }
-                if (supported.isEmpty()) { request.deny(); return }
-                val missing = supported.flatMap { webResourcePermissions(it) }
-                    .distinct()
-                    .filter { ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED }
-                if (missing.isEmpty()) { request.grant(supported.toTypedArray()); return }
-                if (pendingWebPermissionRequest != null) { request.deny(); return }
-                pendingWebPermissionRequest = request
-                webPermissionLauncher.launch(missing.toTypedArray())
-            }
-
-            override fun onShowFileChooser(
-                view: WebView,
-                callback: ValueCallback<Array<Uri>>,
-                params: FileChooserParams,
-            ): Boolean {
-                filePathCallback?.onReceiveValue(emptyArray())
-                filePathCallback = callback
-                return runCatching {
-                    fileChooserLauncher.launch(params.createIntent()); true
-                }.getOrElse {
-                    filePathCallback = null; false
-                }
-            }
-        }
-
-        // 备份导出等下载：交给系统下载管理器，落到公共下载目录
-        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-            runCatching {
-                if (url.startsWith("blob:") || url.startsWith("data:")) {
-                    // blob/data 由页面内 JS 触发的 a[download] 处理；提示用户等待
-                    Toast.makeText(this, "正在导出…", Toast.LENGTH_SHORT).show()
-                    return@DownloadListener
-                }
-                val request = DownloadManager.Request(Uri.parse(url)).apply {
-                    addRequestHeader("User-Agent", userAgent)
-                    addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
-                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    setDestinationInExternalPublicDir(
-                        Environment.DIRECTORY_DOWNLOADS,
-                        android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType),
-                    )
-                }
-                (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-                Toast.makeText(this, "已开始下载到「下载」目录", Toast.LENGTH_SHORT).show()
-            }
-        })
-
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
-            }
-        })
-
-        // 冷启动带深链（如来电接听）直接加载目标；否则加载首页
-        webView.loadUrl(consumeOpenUrl(intent) ?: SITE_URL)
-        ensurePushService()
-    }
-
-    /** singleTask：App 已在运行时（如全屏来电页接听）通过 onNewIntent 送达深链 */
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        val target = consumeOpenUrl(intent) ?: return
-        // SPA 已加载：loadUrl 到同页 hash 只触发 hashchange，不会整页重载
-        webView.loadUrl(target)
-    }
-
-    private fun consumeOpenUrl(intent: Intent?): String? {
-        val target = intent?.getStringExtra(EXTRA_OPEN_URL) ?: return null
-        intent.removeExtra(EXTRA_OPEN_URL)
-        return target.takeIf { it.startsWith(SITE_URL) }
-    }
-
-    /**
-     * 隐藏系统状态栏（沉浸式）：页面自带虚拟状态栏，系统那条纯属多余。
-     * 保持 decorFitsSystemWindows=true 只隐藏 status bar——WebView 会自动铺满腾出的空间，
-     * 且不影响 adjustResize 键盘避让；从屏幕顶部下滑可临时唤出系统状态栏，松手自动再隐藏。
-     */
-    private fun hideSystemStatusBar() {
-        WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.statusBars())
-            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        // 临时唤出状态栏后、或从锁屏/多任务回来时焦点变化，需要重新隐藏一次
-        if (hasFocus) hideSystemStatusBar()
-    }
-
-    private fun ensurePushService() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
         } else {
-            PushService.start(this)
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
+            )
         }
+
+        val sessionId = intent.getStringExtra(EXTRA_SESSION_ID).orEmpty()
+        val characterName = intent.getStringExtra(EXTRA_CHARACTER_NAME).orEmpty().ifEmpty { "对方" }
+        val callTs = intent.getLongExtra(EXTRA_CALL_TS, 0L)
+
+        val density = resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setBackgroundColor(Color.parseColor("#161A22"))
+            setPadding(dp(32), dp(96), dp(32), dp(56))
+        }
+
+        root.addView(TextView(this).apply {
+            text = characterName
+            textSize = 34f
+            setTextColor(Color.WHITE)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        })
+        root.addView(TextView(this).apply {
+            text = "语音来电…"
+            textSize = 15f
+            setTextColor(Color.parseColor("#9AA3B2"))
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, 0)
+        })
+
+        // 撑开中部，把按钮压到底部
+        root.addView(TextView(this), LinearLayout.LayoutParams(0, 0, 1f).apply {
+            width = LinearLayout.LayoutParams.MATCH_PARENT
+        })
+
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        fun roundButton(label: String, color: Int, onClick: () -> Unit): Button =
+            Button(this).apply {
+                text = label
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(color)
+                }
+                layoutParams = LinearLayout.LayoutParams(dp(78), dp(78)).apply {
+                    marginStart = dp(34)
+                    marginEnd = dp(34)
+                }
+                setOnClickListener { onClick() }
+            }
+        buttons.addView(roundButton("拒接", Color.parseColor("#E5484D")) { finishCall() })
+        buttons.addView(roundButton("接听", Color.parseColor("#30A46C")) { answer(sessionId, callTs) })
+        root.addView(buttons)
+
+        setContentView(root)
     }
 
-    override fun onDestroy() {
-        CookieManager.getInstance().flush()
-        webView.destroy()
-        super.onDestroy()
+    private fun answer(sessionId: String, callTs: Long) {
+        CallAlert.stop(this)
+        val ts = if (callTs > 0) callTs else System.currentTimeMillis()
+        val target = "${MainActivity.SITE_URL}/#incoming-call=${android.net.Uri.encode(sessionId)}&rt=$ts&answered=1"
+        val launch = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(MainActivity.EXTRA_OPEN_URL, target)
+        }
+        // 锁屏接听：请求解锁后再进主界面（用户取消解锁则停在锁屏，通话不开始）
+        if (Build.VERSION.SDK_INT >= 26) {
+            val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            if (keyguard.isKeyguardLocked) {
+                keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
+                    override fun onDismissSucceeded() {
+                        runCatching { startActivity(launch) }
+                        finish()
+                    }
+
+                    override fun onDismissCancelled() {
+                        finish()
+                    }
+                })
+                return
+            }
+        }
+        runCatching { startActivity(launch) }
+        finish()
     }
 
-    /** 暴露给网页的原生桥（网页侧可用 window.AndroidShell 特性检测壳环境）。 */
-    inner class ShellBridge {
-        @JavascriptInterface
-        fun getVersion(): String = VERSION
-
-        /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
-        @JavascriptInterface
-        fun openAppSettings() {
-            runCatching {
-                startActivity(
-                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }
-        }
-
-        /** 请求忽略电池优化（保活关键一步）。 */
-        @SuppressLint("BatteryLife")
-        @JavascriptInterface
-        fun requestIgnoreBatteryOptimization() {
-            runCatching {
-                startActivity(
-                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }
-        }
+    private fun finishCall() {
+        CallAlert.stop(this)
+        finish()
     }
 }

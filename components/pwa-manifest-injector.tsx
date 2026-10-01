@@ -52,8 +52,43 @@ function applyAndroidShellStatusBarDrop(): (() => void) | void {
   return () => window.removeEventListener("floatshell-statusbarheight", handleStatusBarHeightEvent);
 }
 
+/**
+ * 临时诊断条：定位黑块根因用，确认问题后应移除。
+ * 用 position:fixed + 很高的 z-index 固定在物理屏幕最顶，不受 --status-bar-drop 影响，
+ * 这样不管黑块是什么原因造成的，这条诊断信息本身始终可见。
+ */
+function mountDebugBanner() {
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  if (!navigator.userAgent.includes(FLOAT_SHELL_UA_MARK)) return;
+
+  const banner = document.createElement("div");
+  banner.id = "__floatshell_debug_banner";
+  banner.style.cssText = [
+    "position:fixed", "top:0", "left:0", "right:0", "z-index:2147483647",
+    "background:#ff2d55", "color:#fff", "font-size:11px", "line-height:1.4",
+    "font-family:monospace", "padding:4px 6px", "white-space:pre-wrap",
+    "pointer-events:none",
+  ].join(";");
+  document.body.appendChild(banner);
+
+  const render = () => {
+    const bridge = readAndroidShellBridge();
+    const bridgeVal = bridge?.getStatusBarHeightPx ? (() => {
+      try { return String(bridge.getStatusBarHeightPx!()); } catch (e) { return `err:${e}`; }
+    })() : "无bridge";
+    const cssVal = getComputedStyle(document.documentElement).getPropertyValue("--status-bar-drop") || "(空)";
+    const inlineVal = document.documentElement.style.getPropertyValue("--status-bar-drop") || "(空)";
+    banner.textContent = `UA匹配:是 | bridge值:${bridgeVal} | CSS计算值:${cssVal} | 行内设置值:${inlineVal}`;
+  };
+
+  render();
+  window.addEventListener("floatshell-statusbarheight", render);
+  setInterval(render, 1000);
+}
+
 export function PWAManifestInjector() {
   useEffect(() => {
+    mountDebugBanner();
     const cleanupStatusBarDrop = applyAndroidShellStatusBarDrop();
     const root = document.documentElement;
     const displayModeQueries = ["fullscreen", "standalone", "minimal-ui"].map(mode => (

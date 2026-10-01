@@ -963,6 +963,14 @@ function useAndroidCaretKeyboardLift() {
         return;
       }
 
+      // interactive-widget=resizes-content 生效时（布局视口被键盘原生压缩、innerHeight 变小），
+      // 键盘避让已由原生布局完成；此时再叠加手动 lift 会把输入栏顶离键盘，
+      // 在输入栏和键盘之间产生一条空白。检测到原生压缩标记时彻底关闭手动抬升。
+      if (document.documentElement.dataset.nativeKbResize === "1") {
+        applyLift(0);
+        return;
+      }
+
       const keyboardTop = viewport.offsetTop + viewport.height;
       const keyboardInset = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
       const targetRect = getKeyboardTargetRect(element);
@@ -985,14 +993,18 @@ function useAndroidCaretKeyboardLift() {
 
     const handleFocusIn = (event: FocusEvent) => {
       const target = event.target;
-      if (!isKeyboardEditableElement(target)) return;
+      if (!isKeyboardEditableElement(target)) {
+        return;
+      }
       focusedElement = target;
       requestUpdate();
     };
 
     const handleFocusOut = () => {
       focusedElement = null;
-      applyLift(0);
+      // 失焦统一走 requestUpdate()：由 update() 依据当前状态清掉 lift（移除 --mobile-keyboard-lift）。
+      // 抬升已改用 margin-top（真实布局位移）实现，hit-test 始终与视觉同步，不再需要同步 applyLift(0)。
+      requestUpdate();
     };
 
     const handleCaretMove = () => {
@@ -1021,6 +1033,79 @@ function useAndroidCaretKeyboardLift() {
       viewport?.removeEventListener("resize", handleViewportChange);
       viewport?.removeEventListener("scroll", handleViewportChange);
       root.style.removeProperty("--mobile-keyboard-lift");
+    };
+  }, []);
+}
+
+/**
+ * Android 原生键盘适配（配合 app/layout.tsx 的 viewport interactive-widget=resizes-content）。
+ * 键盘弹出时浏览器会原生压缩布局视口（window.innerHeight 变小），这里把
+ * --phone-screen-height 实时同步为 (innerHeight + status-bar-drop)，使虚拟手机
+ * 整体压缩、输入栏天然贴在键盘上方——无需手动抬升，点击命中区域由原生布局保证。
+ * 旧版浏览器不支持 interactive-widget 时 innerHeight 不变，本 hook 等于空操作，
+ * 自动回退到 useAndroidCaretKeyboardLift 的手动抬升方案，两套机制不会叠加。
+ */
+function useAndroidNativeKeyboardViewport() {
+  useEffect(() => {
+    if (!/Android/i.test(navigator.userAgent)) {
+      return;
+    }
+    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
+    if (!mobileMq.matches) {
+      return;
+    }
+
+    const root = document.documentElement;
+    let raf = 0;
+    let maxInnerHeight = window.innerHeight;
+
+    const apply = () => {
+      raf = 0;
+      if (!mobileMq.matches) {
+        return;
+      }
+      // innerHeight 明显小于历史最大值 = 键盘已让浏览器原生压缩布局视口。
+      // 打上标记，供 useAndroidCaretKeyboardLift 关闭手动抬升，避免双重补偿产生中间空白。
+      maxInnerHeight = Math.max(maxInnerHeight, window.innerHeight);
+      if (window.innerHeight < maxInnerHeight - 80) {
+        root.dataset.nativeKbResize = "1";
+      } else {
+        delete root.dataset.nativeKbResize;
+      }
+      // 手机壳有 -status-bar-drop 的负 margin-top，高度补上这段才能让底栏贴住视口底/键盘顶
+      const wrap = document.querySelector<HTMLElement>(".phone-shell-wrap");
+      const drop = wrap ? (parseFloat(getComputedStyle(wrap).getPropertyValue("--status-bar-drop")) || 0) : 0;
+      root.style.setProperty("--phone-screen-height", `${Math.round(window.innerHeight + drop)}px`);
+    };
+
+    const requestApply = () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(apply);
+    };
+
+    const handleOrientationChange = () => {
+      // 旋转屏幕时 innerHeight 基线会整体变化，重置后再按新方向判断
+      maxInnerHeight = window.innerHeight;
+      requestApply();
+    };
+
+    apply();
+    window.addEventListener("resize", requestApply);
+    window.addEventListener("orientationchange", handleOrientationChange);
+    // 用户在设置里调整状态栏上移量（写入 wrap 的 --status-bar-drop）时也要重算
+    const observer = new MutationObserver(requestApply);
+    const wrap = document.querySelector<HTMLElement>(".phone-shell-wrap");
+    if (wrap) {
+      observer.observe(wrap, { attributes: true, attributeFilter: ["style"] });
+    }
+
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", requestApply);
+      window.removeEventListener("orientationchange", handleOrientationChange);
+      observer.disconnect();
+      delete root.dataset.nativeKbResize;
+      root.style.removeProperty("--phone-screen-height");
     };
   }, []);
 }
@@ -1056,6 +1141,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     musicOverlayControllerRef.current = controller;
   }, []);
   useAndroidCaretKeyboardLift();
+  useAndroidNativeKeyboardViewport();
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [layout, setLayout] = useState<DesktopLayout>(DEFAULT_LAYOUT);
   // Dock is an ordered icon-id list (max DOCK_MAX), kept disjoint from `layout`.

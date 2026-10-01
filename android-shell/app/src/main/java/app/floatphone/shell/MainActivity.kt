@@ -26,6 +26,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 /**
  * Float 小手机安卓壳：全屏 WebView 直接加载线上站点。
@@ -86,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, true)
+        hideSystemStatusBar()
         // 音量键默认调媒体流：WebView 里的语音条/TTS 都走媒体流播放，
         // 不设的话短音频没在播时按键调的是铃声，用户感觉"音量键无效、声音巨大"
         volumeControlStream = AudioManager.STREAM_MUSIC
@@ -197,6 +200,24 @@ class MainActivity : AppCompatActivity() {
         val target = intent?.getStringExtra(EXTRA_OPEN_URL) ?: return null
         intent.removeExtra(EXTRA_OPEN_URL)
         return target.takeIf { it.startsWith(SITE_URL) }
+    }
+
+    /**
+     * 隐藏系统状态栏（沉浸式）：页面自带虚拟状态栏，系统那条纯属多余。
+     * 保持 decorFitsSystemWindows=true 只隐藏 status bar——WebView 会自动铺满腾出的空间，
+     * 且不影响 adjustResize 键盘避让；从屏幕顶部下滑可临时唤出系统状态栏，松手自动再隐藏。
+     */
+    private fun hideSystemStatusBar() {
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.statusBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 临时唤出状态栏后、或从锁屏/多任务回来时焦点变化，需要重新隐藏一次
+        if (hasFocus) hideSystemStatusBar()
     }
 
     private fun ensurePushService() {

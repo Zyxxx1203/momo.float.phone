@@ -1975,14 +1975,17 @@ export async function buildChatPromptMessages(
     }
     if (!session.isGroup && !isOfflineMode && resolvedAppId === "chat") {
         const meetingInviteConfig = resolveMeetingInviteCardConfig(loadChatAppSettings());
-        llmMessages.push({
-            role: "system",
-            content: [
-                meetingInviteConfig.contract.trim() || "你可以根据当前对话语境，自主决定是否邀请用户线下见面。不要机械邀请，也不要频繁使用。",
-                "只有当你确实想见面时，才把契约要求的字段完整输出，并用 [邀请见面] 与 [/邀请见面] 包住整个字段区块。",
-                "字段内容会被界面按用户自定义 HTML 渲染成邀请卡片；包裹标签和字段不会显示成普通聊天文字。不要解释标签，每轮最多输出一张邀请卡片。",
-            ].join("\n"),
-        });
+        // 邀请见面提示词：enabled=false 时跳过；备注提示词不受影响，始终注入
+        if (meetingInviteConfig.enabled !== false) {
+            llmMessages.push({
+                role: "system",
+                content: [
+                    meetingInviteConfig.contract.trim() || "你可以根据当前对话语境，自主决定是否邀请用户线下见面。不要机械邀请，也不要频繁使用。",
+                    "只有当你确实想见面时，才把契约要求的字段完整输出，并用 [邀请见面] 与 [/邀请见面] 包住整个字段区块。",
+                    "字段内容会被界面按用户自定义 HTML 渲染成邀请卡片；包裹标签和字段不会显示成普通聊天文字。不要解释标签，每轮最多输出一张邀请卡片。",
+                ].join("\n"),
+            });
+        }
         llmMessages.push({
             role: "system",
             content: [

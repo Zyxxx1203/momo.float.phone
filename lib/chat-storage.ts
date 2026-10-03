@@ -302,6 +302,8 @@ export type ChatMessage = {
 
 export type MeetingInviteCardConfig = {
     mode: "native" | "custom";
+    /** 是否将邀请见面提示词注入私聊提示词；默认 true（未设置视为开启）。 */
+    enabled?: boolean;
     /** 附加到私聊提示词中的邀请输出约定；固定控制标记仍由系统兜底。 */
     contract: string;
     /** 沙盒中运行的 HTML/CSS/JS；可用 window.STATUS_RAW / {{RAW}} 读取卡片数据。 */
@@ -334,6 +336,8 @@ export function resolveMeetingInviteCardConfig(settings?: ChatAppSettings): Meet
     const raw = settings?.meetingInviteCard;
     return {
         mode: raw?.mode === "custom" ? "custom" : "native",
+        // enabled 未设置（旧数据/新建会话）视为 true，保持原有行为
+        enabled: raw?.enabled === false ? false : true,
         contract: typeof raw?.contract === "string" ? raw.contract : DEFAULT_MEETING_INVITE_CONTRACT,
         renderHtml: typeof raw?.renderHtml === "string" ? raw.renderHtml : DEFAULT_MEETING_INVITE_RENDER,
         previewRaw: typeof raw?.previewRaw === "string" ? raw.previewRaw : DEFAULT_MEETING_INVITE_PREVIEW,

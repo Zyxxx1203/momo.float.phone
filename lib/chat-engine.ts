@@ -1976,11 +1976,8 @@ export async function buildChatPromptMessages(
     if (!session.isGroup && !isOfflineMode && resolvedAppId === "chat") {
         const meetingInviteConfig = resolveMeetingInviteCardConfig(loadChatAppSettings());
         // ── 邀请见面卡片提示词 ──
-        // enabled=true → 每轮注入；enabled=false → 仅检测到相关关键词时注入
-        const recentInviteText = promptHistory.map(m => m.content).join(" ").slice(-2000);
-        const inviteKeywords = ["见面", "邀请", "约", "线下", "出来", "约会", "碰面", "聚一聚"];
-        const inviteMentioned = inviteKeywords.some(kw => recentInviteText.includes(kw));
-        if (meetingInviteConfig.enabled || inviteMentioned) {
+        // enabled=true → 每轮注入；enabled=false → 完全不注入
+        if (meetingInviteConfig.enabled) {
             llmMessages.push({
                 role: "system",
                 content: [
@@ -1992,10 +1989,8 @@ export async function buildChatPromptMessages(
         }
 
         // ── 私聊备注提示词 ──
-        // remarkEnabled=true → 每轮注入；remarkEnabled=false → 仅检测到相关关键词时注入
-        const remarkKeywords = ["备注", "备注名", "称呼", "叫你什么", "给你起名", "改备注", "备注信息"];
-        const remarkMentioned = remarkKeywords.some(kw => recentInviteText.includes(kw));
-        if (meetingInviteConfig.remarkEnabled || remarkMentioned) {
+        // remarkEnabled=true → 每轮注入；remarkEnabled=false → 完全不注入
+        if (meetingInviteConfig.remarkEnabled) {
             llmMessages.push({
                 role: "system",
                 content: [

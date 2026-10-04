@@ -264,11 +264,11 @@ export function GlobalChatInfoSettings({ onBack }: { onBack: () => void }) {
                 <div className="theme-section-page flex flex-col gap-3">
                     <div className="menu-group">
                         <div className="menu-item">
-                            <div className="menu-label-group"><span className="menu-label">每轮注入邀请卡片提示词</span><span className="menu-desc">开启后每轮都注入；关闭后仅对话提及见面/邀请等时才注入</span></div>
+                            <div className="menu-label-group"><span className="menu-label">注入邀请卡片提示词</span><span className="menu-desc">开启后每轮向 AI 注入；关闭则完全不注入</span></div>
                             <Toggle checked={draftMeetingInvite.enabled === true} onChange={checked => setDraftMeetingInvite(current => ({ ...current, enabled: checked }))} />
                         </div>
                         <div className="menu-item">
-                            <div className="menu-label-group"><span className="menu-label">每轮注入私聊备注提示词</span><span className="menu-desc">开启后每轮都注入；关闭后仅对话提及相关话题时才注入</span></div>
+                            <div className="menu-label-group"><span className="menu-label">注入私聊备注提示词</span><span className="menu-desc">开启后每轮向 AI 注入；关闭则完全不注入</span></div>
                             <Toggle checked={draftMeetingInvite.remarkEnabled === true} onChange={checked => setDraftMeetingInvite(current => ({ ...current, remarkEnabled: checked }))} />
                         </div>
                         <div className="menu-item">

@@ -218,6 +218,7 @@ export function GlobalChatInfoSettings({ onBack }: { onBack: () => void }) {
     const meetingInvitePayload = JSON.stringify({
         type: "ai-phone-meeting-invite-card",
         version: 1,
+        enabled: draftMeetingInvite.enabled !== false,
         contract: draftMeetingInvite.contract,
         renderHtml: draftMeetingInvite.renderHtml,
         previewRaw: draftMeetingInvite.previewRaw,
@@ -228,6 +229,7 @@ export function GlobalChatInfoSettings({ onBack }: { onBack: () => void }) {
             const parsed = JSON.parse(payload) as Record<string, unknown>;
             const next: MeetingInviteCardConfig = {
                 mode: "custom",
+                enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : true,
                 contract: typeof parsed.contract === "string" ? parsed.contract : DEFAULT_MEETING_INVITE_CONTRACT,
                 renderHtml: typeof parsed.renderHtml === "string" ? parsed.renderHtml : DEFAULT_MEETING_INVITE_RENDER,
                 previewRaw: typeof parsed.previewRaw === "string" ? parsed.previewRaw : DEFAULT_MEETING_INVITE_PREVIEW,
@@ -260,6 +262,10 @@ export function GlobalChatInfoSettings({ onBack }: { onBack: () => void }) {
                 <div className="theme-section-page flex flex-col gap-3">
                     <div className="menu-group">
                         <div className="menu-item">
+                            <div className="menu-label-group"><span className="menu-label">启用邀请见面卡片</span><span className="menu-desc">关闭后不向 AI 注入邀请见面卡片提示词</span></div>
+                            <Toggle checked={draftMeetingInvite.enabled !== false} onChange={checked => setDraftMeetingInvite(current => ({ ...current, enabled: checked }))} />
+                        </div>
+                        <div className="menu-item">
                             <div className="menu-label-group"><span className="menu-label">启用自定义卡片</span><span className="menu-desc">关闭时使用 Float 默认邀请卡片</span></div>
                             <Toggle checked={draftMeetingInvite.mode === "custom"} onChange={checked => setDraftMeetingInvite(current => ({ ...current, mode: checked ? "custom" : "native" }))} />
                         </div>
@@ -283,7 +289,7 @@ export function GlobalChatInfoSettings({ onBack }: { onBack: () => void }) {
                     <div className="flex gap-2 items-center">
                         <CSSSchemeBar target="meeting_invite_card" currentCSS={meetingInvitePayload} onLoad={loadMeetingInvitePayload} />
                         <button className="ui-btn ui-btn-outline flex-1" onClick={() => {
-                            const next = { mode: "native", contract: DEFAULT_MEETING_INVITE_CONTRACT, renderHtml: DEFAULT_MEETING_INVITE_RENDER, previewRaw: DEFAULT_MEETING_INVITE_PREVIEW } as MeetingInviteCardConfig;
+                            const next = { mode: "native", enabled: draftMeetingInvite.enabled !== false, contract: DEFAULT_MEETING_INVITE_CONTRACT, renderHtml: DEFAULT_MEETING_INVITE_RENDER, previewRaw: DEFAULT_MEETING_INVITE_PREVIEW } as MeetingInviteCardConfig;
                             setDraftMeetingInvite(next);
                             setMeetingPreviewHtml(next.renderHtml);
                         }}>恢复默认</button>

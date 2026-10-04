@@ -1975,8 +1975,12 @@ export async function buildChatPromptMessages(
     }
     if (!session.isGroup && !isOfflineMode && resolvedAppId === "chat") {
         const meetingInviteConfig = resolveMeetingInviteCardConfig(loadChatAppSettings());
-        // 邀请见面提示词：enabled=false 时跳过；备注提示词不受影响，始终注入
-        if (meetingInviteConfig.enabled !== false) {
+        // ── 邀请见面卡片提示词 ──
+        // enabled=true → 每轮注入；enabled=false → 仅检测到相关关键词时注入
+        const recentInviteText = promptHistory.map(m => m.content).join(" ").slice(-2000);
+        const inviteKeywords = ["见面", "邀请", "约", "线下", "出来", "约会", "碰面", "聚一聚"];
+        const inviteMentioned = inviteKeywords.some(kw => recentInviteText.includes(kw));
+        if (meetingInviteConfig.enabled || inviteMentioned) {
             llmMessages.push({
                 role: "system",
                 content: [
@@ -1986,14 +1990,21 @@ export async function buildChatPromptMessages(
                 ].join("\n"),
             });
         }
-        llmMessages.push({
-            role: "system",
-            content: [
-                `私聊备注信息：用户给你的备注是“${session.alias?.trim() || character.name}”；你给用户的备注是“${session.characterRemarkForUser?.trim() || "尚未设置"}”。`,
+
+        // ── 私聊备注提示词 ──
+        // remarkEnabled=true → 每轮注入；remarkEnabled=false → 仅检测到相关关键词时注入
+        const remarkKeywords = ["备注", "备注名", "称呼", "叫你什么", "给你起名", "改备注", "备注信息"];
+        const remarkMentioned = remarkKeywords.some(kw => recentInviteText.includes(kw));
+        if (meetingInviteConfig.remarkEnabled || remarkMentioned) {
+            llmMessages.push({
+                role: "system",
+                content: [
+                    `私聊备注信息：用户给你的备注是“${session.alias?.trim() || character.name}”；你给用户的备注是“${session.characterRemarkForUser?.trim() || "尚未设置"}”。`,
                 "用户询问备注时，请按当前信息自然回答。用户要求你更改你给TA的备注时，请结合人设与最近聊天决定新备注，并在自然回复末尾另起一行输出控制标记：[给用户备注:新备注]。",
                 "新备注不超过20个字；控制标记不会展示给用户。不要用这个标记改动用户给你的备注。",
-            ].join("\n"),
-        });
+                ].join("\n"),
+            });
+        }
     }
     if (avatarChangeIntent) {
         llmMessages.push({

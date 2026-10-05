@@ -101,14 +101,19 @@ class PushService : Service() {
 
     /** 借 WebView 的登录 Cookie 调站点接口获取连接参数。 */
     private fun fetchConfig(): PushConfig? = runCatching {
-        val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL) ?: return null
+        // 单机模式（NEXT_PUBLIC_SELF_HOSTED_MODE=true）不走登录流程，WebView 里
+        // 可能完全没有 Cookie。此前这里 `?: return null` 把这种正常情况直接判成
+        // 「未登录」，壳于是永远拿不到配置、常驻通知停在「未登录或站点不可达」。
+        // 改为：Cookie 缺失也照常请求，放不放行交给服务端裁决。
+        val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL).orEmpty()
 
         fun getJson(path: String): JSONObject? {
-            val request = Request.Builder()
+            val builder = Request.Builder()
                 .url("${MainActivity.SITE_URL}$path")
-                .header("Cookie", cookie)
                 .header("Accept", "application/json")
-                .build()
+            // 空 Cookie 头可能被服务端/WAF 拒绝，为空时干脆不带这个头。
+            if (cookie.isNotEmpty()) builder.header("Cookie", cookie)
+            val request = builder.build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return null
                 return JSONObject(response.body?.string() ?: return null)
@@ -143,11 +148,11 @@ class PushService : Service() {
                 )
                 .toString()
                 .toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
+            val builder = Request.Builder()
                 .url("${MainActivity.SITE_URL}/api/push/subscribe")
-                .header("Cookie", cookie)
                 .post(body)
-                .build()
+            if (cookie.isNotEmpty()) builder.header("Cookie", cookie)
+            val request = builder.build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) shellSubRegistered = true
             }

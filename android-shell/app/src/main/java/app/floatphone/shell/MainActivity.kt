@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -20,6 +21,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -38,17 +40,21 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.0"
+        const val VERSION = "1.0.1"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
     }
 
+    private lateinit var rootContainer: FrameLayout
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
     /** 系统状态栏实际高度（CSS px，即物理像素 / density），实时更新。 */
     @Volatile
     private var statusBarHeightCssPx: Int = 0
+
+    /** 当前键盘（IME）高度（物理像素），0 = 键盘收起；用于给 WebView 让出底部空间。 */
+    private var imeInsetPx: Int = 0
 
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -93,14 +99,30 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        enableDisplayCutoutCover()
         hideSystemStatusBar()
-        observeStatusBarHeight()
         // 音量键默认调媒体流：WebView 里的语音条/TTS 都走媒体流播放，
         // 不设的话短音频没在播时按键调的是铃声，用户感觉"音量键无效、声音巨大"
         volumeControlStream = AudioManager.STREAM_MUSIC
 
+        // 外层容器：decorFits=false 后系统不再替 App 避让键盘，由容器底部内边距
+        // 把键盘高度让出来（WebView 随之变矮），网页收到 resize 后输入栏自动上移。
         webView = WebView(this)
-        setContentView(webView)
+        rootContainer = FrameLayout(this).apply {
+            addView(
+                webView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                ),
+            )
+        }
+        setContentView(rootContainer)
+        // 挂上 insets 监听：状态栏高度注入 + 键盘避让都靠它。必须在 setContentView 之后，
+        // 此时 rootContainer 已初始化，监听回调里才能安全地给它设内边距。
+        observeWindowInsets()
+        // 首帧主动请求一次 insets，确保启动即拿到状态栏高度（部分机型不会自动派发首次回调）。
+        ViewCompat.requestApplyInsets(rootContainer)
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -129,14 +151,6 @@ class MainActivity : AppCompatActivity() {
                 return runCatching {
                     startActivity(Intent(Intent.ACTION_VIEW, url)); true
                 }.getOrDefault(true)
-            }
-
-            // 页面每次完成加载（含 SPA 首载、手动刷新）都补一次状态栏高度注入：
-            // JS bridge 在页面脚本跑之前就已可用，但页面自己的监听器需要这一手动触发兜底，
-            // 避免"注入发生在页面还没准备好接收"的时序错过。
-            override fun onPageFinished(view: WebView, url: String) {
-                super.onPageFinished(view, url)
-                injectStatusBarHeight()
             }
         }
 
@@ -217,9 +231,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * 允许窗口画进刘海/挖孔区域。
+     *
+     * 隐藏状态栏后，LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT 只允许内容进入「仍被系统栏盖住」
+     * 的挖孔区；状态栏一藏，挖孔区就不再算系统栏范围，窗口被整块下移留黑——页面 top:0 因此
+     * 落在挖孔下方，表现为顶部一条黑边（截图里红条诊断条下面那截就是它）。
+     * shortEdges 让窗口在竖屏短边（顶部/底部）无条件铺进挖孔区，WebView 才能盖满整块屏幕。
+     */
+    private fun enableDisplayCutoutCover() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+    }
+
+    /**
      * 隐藏系统状态栏（沉浸式）：页面自带虚拟状态栏，系统那条纯属多余。
-     * 保持 decorFitsSystemWindows=true 只隐藏 status bar——WebView 会自动铺满腾出的空间，
-     * 且不影响 adjustResize 键盘避让；从屏幕顶部下滑可临时唤出系统状态栏，松手自动再隐藏。
+     * decorFitsSystemWindows=false 时 WebView 本就铺满全屏，这里只负责隐掉系统状态栏那一条；
+     * 键盘避让交由 observeWindowInsets() 的 IME 内边距接管。
+     * 从屏幕顶部下滑可临时唤出系统状态栏，松手自动再隐藏。
      */
     private fun hideSystemStatusBar() {
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -229,28 +261,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 监听真实状态栏高度（物理像素，经 WindowInsets 实测，隐藏状态栏后依然能拿到原始尺寸）。
-     * 不同机型/异形屏/系统字体缩放都会让这个值跟 CSS 的 env(safe-area-inset-top) 估算不一致，
-     * 页面自己猜不准——所以由壳实测后用 JS 注入，页面只管用，不用再猜。
+     * 统一处理 WindowInsets：实测状态栏高度（供桥查询） + 键盘（IME）避让。
+     * 两者都必须在 decorFitsSystemWindows=false 的前提下由 App 自己接管。
      */
-    private fun observeStatusBarHeight() {
+    private fun observeWindowInsets() {
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
-            val statusBarPx = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
-            val cssPx = (statusBarPx / resources.displayMetrics.density).toInt()
-            if (cssPx != statusBarHeightCssPx) {
-                statusBarHeightCssPx = cssPx
-                injectStatusBarHeight()
+            // 状态栏真实高度：必须用 getInsetsIgnoringVisibility。状态栏已被
+            // hideSystemStatusBar() 隐藏，getInsets() 只返回"当前可见"的栏尺寸，隐藏后恒为 0。
+            // 如今仅作为 ShellBridge.getStatusBarHeightPx() 的查询值留存（页面不再据此补位）。
+            val statusBarPx = insets
+                .getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars()).top
+            statusBarHeightCssPx = (statusBarPx / resources.displayMetrics.density).toInt()
+
+            // 键盘避让：setDecorFitsSystemWindows(false) 后 adjustResize 不再由系统代劳，
+            // 网页侧 interactiveWidget("resizes-content") 在 WebView 里同样不生效，
+            // 于是输入框被键盘盖住。这里把 IME 高度写成容器底部内边距，WebView 变矮，
+            // 网页 resize 后输入栏自然贴在键盘上方。
+            val imePx = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            if (imePx != imeInsetPx) {
+                imeInsetPx = imePx
+                if (::rootContainer.isInitialized) rootContainer.setPadding(0, 0, 0, imePx)
             }
             insets
         }
-    }
-
-    /** 把实测状态栏高度（CSS px）写入页面根元素的 CSS 变量，供 phone-shell.css 的 --status-bar-drop 消费。 */
-    private fun injectStatusBarHeight() {
-        if (!::webView.isInitialized || statusBarHeightCssPx <= 0) return
-        val js = "document.documentElement.style.setProperty('--android-shell-status-bar-height', '${statusBarHeightCssPx}px');" +
-            "window.dispatchEvent(new CustomEvent('floatshell-statusbarheight', { detail: $statusBarHeightCssPx }));"
-        webView.evaluateJavascript(js, null)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -281,7 +314,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun getVersion(): String = VERSION
 
-        /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
+        /** 实测系统状态栏高度（CSS px）。仅供页面需要时查询，壳不再主动注入 CSS 变量。 */
         @JavascriptInterface
         fun getStatusBarHeightPx(): Int = statusBarHeightCssPx
 

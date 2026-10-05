@@ -7,7 +7,7 @@ import { bgSetInterval } from "./bg-timer";
 import { buildChatPromptMessages } from "./chat-engine";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
 import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
-import { hasAccountPushSubscription, isWithinPushQuietHours, loadPushQuietHours, peekAccountPushSubscribed } from "./push-client";
+import { hasAccountPushSubscription, isShellEnvironment, isWithinPushQuietHours, loadPushQuietHours, peekAccountPushSubscribed } from "./push-client";
 import { isPersonalPushCloudActive, pushJobsFetch } from "./personal-push-cloud";
 import {
     buildOfflineShortcutContinuation,
@@ -88,8 +88,13 @@ export type BailoutArmResult =
     | { ok: false; reason: string };
 
 function bailoutEnabled(): boolean {
-    // 离线任务只写用户自己的个人云；单机自部署与账号站点使用同一链路。
-    return typeof window !== "undefined" && isPersonalPushCloudActive();
+    // 离线任务只写用户自己的云；单机自部署与账号站点使用同一链路。
+    //
+    // 壳环境额外放行：壳的订阅是以站点账号 id 注册的，任务必须走站点接口
+    // （见 pushJobsFetch 的说明）才能真正投递到壳；若这里仍以「个人云是否
+    // 激活」为准，壳在只配了个人云、没走一遍部署引导的情况下会整体跳过兜底。
+    return typeof window !== "undefined"
+        && (isPersonalPushCloudActive() || isShellEnvironment());
 }
 
 function resolveTimedWakeElapsedMinutes(schedule: TimedWakeSchedule, history: ChatMessage[]): number {

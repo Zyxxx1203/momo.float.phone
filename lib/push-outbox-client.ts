@@ -8,7 +8,7 @@ import { stripHallucinatedTimestamps } from "./llm-provider-adapter";
 import { MacroEngine } from "./macro-engine";
 import { getActiveAppTags } from "./content-tag-utils";
 import { loadChatMessages, loadChatSessions, reindexSessionMessageOrdersByTime } from "./chat-storage";
-import { hasAccountPushSubscription } from "./push-client";
+import { hasAccountPushSubscription, isShellEnvironment } from "./push-client";
 import { isPersonalPushCloudActive, loadPersonalPushCloudState, personalPushFetch } from "./personal-push-cloud";
 import { removeTimedWakeSchedule } from "./timed-wake-storage";
 import { appendBridgeFeed } from "./reality-bridge/storage";
@@ -57,8 +57,12 @@ function clearTimedWakeIfHandled(triggerKey: string | null): void {
 
 export async function consumeServerOutbox(options?: { silent?: boolean; force?: boolean }): Promise<void> {
     if (typeof window === "undefined") return;
+    // 壳环境的任务与回传箱都走站点（账号 id 与壳订阅一致，见 pushJobsFetch）：
+    // 服务端生成的消息落在站点库里，user_id = 站点账号 id。个人云那条路在壳里
+    // 是断的（网关按 OWNER_ID 存取），所以壳必须读站点回传箱，不能读个人云。
+    const shellMode = isShellEnvironment();
     // 共享回传箱已紧急停用：没有个人 Supabase 时直接结束，不请求 status/outbox。
-    if (!isPersonalPushCloudActive()) return;
+    if (!shellMode && !isPersonalPushCloudActive()) return;
     if (consuming) return;
     if (options?.force !== true && Date.now() - lastConsumeAt < OUTBOX_FOREGROUND_CHECK_INTERVAL_MS) return;
     // 没有任何设备订阅推送时，服务端不可能产生普通离线回传；避免所有在线用户空轮询。
@@ -67,8 +71,8 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
     lastConsumeAt = Date.now();
     const passStartMs = Date.now();
     try {
-        // 共享回传箱已停用，只读取用户自己的 Supabase。
-        const sources: Array<"personal" | "shared"> = ["personal"];
+        // 壳读站点回传箱（与它的任务同源）；其余情况读个人云回传箱。
+        const sources: Array<"personal" | "shared"> = shellMode ? ["shared"] : ["personal"];
         const handledTriggerKeys = new Set<string>();
         for (const source of sources) {
           for (let batch = 0; batch < MAX_OUTBOX_BATCHES_PER_PASS; batch += 1) {

@@ -127,6 +127,19 @@ export async function setPersonalPushCloudScheduled(enabled: boolean): Promise<v
 }
 
 export function pushJobsFetch(init: RequestInit): Promise<Response> {
+  // 壳环境一律走站点任务接口，**不走个人云网关**。
+  //
+  // 原因是一处无法在客户端弥合的身份错配：个人云网关把任务一律挂在
+  // OWNER_ID("owner") 下，而 push-generate 投递时用的频道是
+  // shellpush:<job.user_id>；壳却以站点账号 id（单机自部署下 local_user）
+  // 订阅 shellpush:local_user。两边永远对不上，任务建了也没人收得到。
+  //
+  // 站点接口用的是同一个账号 id，与壳订阅天然一致：任务落库 user_id=local_user，
+  // 与壳订阅同库同键，push-generate 按 job.user_id 查订阅、发频道全都正确
+  // （自部署下站点与个人云共用同一个 Supabase 项目，cron 会照常捞取）。
+  if (isShellEnvironment()) {
+    return fetch("/api/push/jobs", { ...init, credentials: "include" });
+  }
   if (isPersonalPushCloudActive()) return personalPushFetch("jobs", init);
   return fetch("/api/push/jobs", { ...init, credentials: "include" });
 }

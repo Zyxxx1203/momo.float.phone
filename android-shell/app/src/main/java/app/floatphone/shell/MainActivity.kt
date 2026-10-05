@@ -152,14 +152,6 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(Intent.ACTION_VIEW, url)); true
                 }.getOrDefault(true)
             }
-
-            // 页面每次完成加载（含 SPA 首载、手动刷新）都补一次状态栏高度注入：
-            // JS bridge 在页面脚本跑之前就已可用，但页面自己的监听器需要这一手动触发兜底，
-            // 避免"注入发生在页面还没准备好接收"的时序错过。
-            override fun onPageFinished(view: WebView, url: String) {
-                super.onPageFinished(view, url)
-                injectStatusBarHeight()
-            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {

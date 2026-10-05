@@ -574,8 +574,12 @@ Deno.serve(async (request: Request) => {
     }
 
     if (action === "status" && request.method === "GET") {
+      // 个人云服务的是本项目唯一主人，订阅来源却有两处：本网关以 OWNER_ID 写入
+      // 的 Web Push 订阅，以及站点以自身账号 id（单机自部署下是 local_user）
+      // 写入的壳合成订阅（endpoint 以 shell: 开头）。只按 OWNER_ID 过滤会把壳
+      // 订阅判成「不存在」，客户端据此跳过全部离线任务预约——推送从此不再产生。
       const rows = await readJson<Array<{ endpoint: string }>>(await rest(
-        `push_subscriptions?user_id=eq.${OWNER_ID}&select=endpoint&limit=1`,
+        "push_subscriptions?select=endpoint&limit=1",
       ));
       return json({ ok: true, subscribed: rows.length > 0 });
     }

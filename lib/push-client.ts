@@ -73,6 +73,12 @@ export function peekAccountPushSubscribed(): boolean | null {
 /** 当前账号（任意设备）是否有推送订阅。结果缓存 24 小时。 */
 export async function hasAccountPushSubscription(): Promise<boolean> {
     if (typeof window === "undefined") return false;
+    // 壳自带 PushService 长连接，离线消息由它直接送达，Web Push 订阅在壳里
+    // 根本不适用。照常查询会命中个人云网关的 status——它按 OWNER_ID 过滤，
+    // 而壳订阅是以站点账号 id（单机自部署下 local_user）注册的，必然查不到，
+    // 于是这里返回 false，所有离线任务预约被静默跳过（表现为 push_jobs 永远
+    // 没有记录、杀掉 App 后再无主动消息）。壳环境直接放行。
+    if (isShellEnvironment()) return true;
     try {
         const cached = kvGet(PUSH_GATE_KV);
         if (cached) {

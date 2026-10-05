@@ -210,6 +210,10 @@ export async function ensurePersonalPushSubscription(): Promise<{ ok: boolean; e
 }
 
 export async function getOfflinePushState(): Promise<OfflinePushState> {
+    // 壳（FloatShell App）自带 PushService 长连接，根本不用 Web Push。
+    // 不特判的话会拿浏览器订阅去量壳、永远得到 "off"，界面于是误报
+    // 「请先开启离线推送」——而那个开关在 App 里既点不动、也不需要点。
+    if (isShellEnvironment()) return "on";
     if (!isPushSupported()) return "unsupported";
     if (isPersonalPushCloudActive()) {
         const personalRegistration = await getPersonalPushRegistration(false);
@@ -224,6 +228,26 @@ export async function getOfflinePushState(): Promise<OfflinePushState> {
         return subscription ? "on" : "off";
     } catch {
         return "off";
+    }
+}
+
+/**
+ * 在壳里发一条真实的测试推送：直接打站点的 /api/push/test。
+ *
+ * 原按钮调的是 enableOfflinePush()，而它在 App 环境里第一步就返回失败
+ * （「App 版自带推送通道，无需在此开启」），根本不会发出任何推送——
+ * 于是用户点多少次测试都没反应，也无从判断链路到底通不通。
+ */
+export async function sendShellTestPush(): Promise<{ ok: boolean; error?: string }> {
+    try {
+        const response = await fetch("/api/push/test", { method: "POST", credentials: "include" });
+        const data = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
+        if (!response.ok || !data.ok) {
+            return { ok: false, error: data.error || `测试推送失败（HTTP ${response.status}）。` };
+        }
+        return { ok: true };
+    } catch {
+        return { ok: false, error: "测试推送请求失败，请检查网络。" };
     }
 }
 

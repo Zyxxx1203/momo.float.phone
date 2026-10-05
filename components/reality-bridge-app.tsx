@@ -30,7 +30,7 @@ import {
 } from "@/lib/reality-bridge/storage";
 import type { BridgeRule } from "@/lib/reality-bridge/types";
 import { createShortcutCommand, loadRecentShortcutCommands, type ShortcutCommand } from "@/lib/shortcut-command-client";
-import { enableOfflinePush, isShellEnvironment } from "@/lib/push-client";
+import { enableOfflinePush, isShellEnvironment, sendShellTestPush } from "@/lib/push-client";
 import {
   isPersonalPushCloudActive,
   isPersonalScreenChatCloudReady,

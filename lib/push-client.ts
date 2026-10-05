@@ -163,7 +163,10 @@ async function getPersonalPushRegistration(create: boolean): Promise<ServiceWork
 async function subscribeRegistration(
     registration: ServiceWorkerRegistration,
     publicKey: string,
-): Promise<PushSubscription | null> {
+) : Promise<PushSubscription | null> {
+    // WebView（壳）或受限浏览器里 pushManager 可能不存在，直接给出可读原因，
+    // 而不是抛 "Cannot read properties of undefined"。
+    if (!registration.pushManager) return null;
     const applicationServerKey = urlBase64ToUint8Array(publicKey);
     let subscription = await registration.pushManager.getSubscription().catch(() => null);
     if (subscription) {
@@ -185,6 +188,11 @@ async function subscribeRegistration(
 
 /** 给个人 Supabase 建立独立 SW 订阅；主 PWA 订阅保留给现实桥/快捷指令，互不覆盖。 */
 export async function ensurePersonalPushSubscription(): Promise<{ ok: boolean; error?: string }> {
+    // 壳（FloatShell App）自带 PushService 长连接，离线消息由它直接收，
+    // 不需要 Web Push 订阅。而 Android WebView 有 Service Worker 却没有
+    // Push API，硬走这条路必然倒在 `registration.pushManager` 为 undefined 上，
+    // 部署流程于是弹出「本设备订阅注册失败」——其实什么都没坏。直接短路。
+    if (isShellEnvironment()) return { ok: true };
     if (!isPersonalPushCloudActive()) return { ok: false, error: "个人离线推送尚未启用。" };
     const registration = await getPersonalPushRegistration(true);
     if (!registration) return { ok: false, error: "个人推送 Service Worker 注册失败。" };

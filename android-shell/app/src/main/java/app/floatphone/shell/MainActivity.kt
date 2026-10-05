@@ -27,6 +27,7 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -68,8 +69,28 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         val callback = filePathCallback ?: return@registerForActivityResult
         filePathCallback = null
-        val data = result.data?.data
-        callback.onReceiveValue(if (data != null) arrayOf(data) else emptyArray())
+        callback.onReceiveValue(collectChosenUris(result))
+    }
+
+    /**
+     * 收集文件选择器返回的全部 URI。
+     *
+     * 网页的 input 带 multiple 时，FileChooserParams.createIntent() 会给系统 Intent 带上
+     * EXTRA_ALLOW_MULTIPLE，多选结果只放进 clipData、data 为 null；华为/荣耀等 ROM 的文件
+     * 管理器即使单选也常只填 clipData。此前只读 data?.data，于是回给 WebView 的是空数组：
+     * 选择器正常弹出、关掉后页面毫无变化（网页侧 files.length 为 0，连格式提示都不会有）。
+     */
+    private fun collectChosenUris(result: ActivityResult): Array<Uri> {
+        if (result.resultCode != android.app.Activity.RESULT_OK) return emptyArray()
+        val data = result.data ?: return emptyArray()
+        val uris = mutableListOf<Uri>()
+        data.clipData?.let { clip ->
+            for (index in 0 until clip.itemCount) {
+                clip.getItemAt(index)?.uri?.let { uris.add(it) }
+            }
+        }
+        data.data?.let { uris.add(it) }
+        return uris.distinct().toTypedArray()
     }
 
     private val notifPermissionLauncher = registerForActivityResult(
@@ -182,7 +203,13 @@ class MainActivity : AppCompatActivity() {
                 filePathCallback?.onReceiveValue(emptyArray())
                 filePathCallback = callback
                 return runCatching {
-                    fileChooserLauncher.launch(params.createIntent()); true
+                    val intent = params.createIntent()
+                    // createIntent() 一般已按 params.mode 带上 EXTRA_ALLOW_MULTIPLE；个别 WebView
+                    // 版本拿不到 multiple 模式，网页多选会退化成单选，这里显式兜一次。
+                    if (params.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+                    fileChooserLauncher.launch(intent); true
                 }.getOrElse {
                     filePathCallback = null; false
                 }

@@ -123,6 +123,28 @@ class MainActivity : AppCompatActivity() {
         else -> emptyList()
     }
 
+    /**
+     * 文件名安全化 + 避开重名。系统下载器遇到同名文件会直接失败（ERROR_FILE_ALREADY_EXISTS），
+     * 所以这里先算一个「名字(1).ext」式的不冲突名称。
+     */
+    private fun safeDownloadName(fileName: String): String {
+        val cleaned = fileName
+            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            .trim()
+            .ifBlank { "download" }
+        val dot = cleaned.lastIndexOf('.')
+        val stem = if (dot > 0) cleaned.substring(0, dot) else cleaned
+        val ext = if (dot > 0) cleaned.substring(dot) else ""
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        var candidate = stem.take(100) + ext
+        var index = 1
+        while (File(dir, candidate).exists() && index < 100) {
+            candidate = stem.take(100) + "($index)" + ext
+            index++
+        }
+        return candidate
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -230,7 +252,7 @@ class MainActivity : AppCompatActivity() {
                     setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                     setDestinationInExternalPublicDir(
                         Environment.DIRECTORY_DOWNLOADS,
-                        android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType),
+                        safeDownloadName(android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)),
                     )
                 }
                 (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
@@ -379,6 +401,26 @@ class MainActivity : AppCompatActivity() {
         /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
         @JavascriptInterface
         fun getStatusBarHeightPx(): Int = statusBarHeightCssPx
+
+        /**
+         * 按直链交给系统下载管理器下载（真·后台）。
+         *
+         * 页面里 fetch → blob → base64 → saveBase64File 这条路虽然能落盘，但读取与编码
+         * 全在网页里跑：App 一进后台 WebView 就暂停 JS，下载随之卡住。有直链的资源
+         * （图片、音乐、安装包等）走这里，交给系统托管——切后台、锁屏、退出 App 都会继续，
+         * 完成后通知栏提示。返回是否成功入队。
+         */
+        @JavascriptInterface
+        fun downloadUrl(url: String, fileName: String): Boolean = runCatching {
+            if (!url.startsWith("http://") && !url.startsWith("https://")) return@runCatching false
+            val request = DownloadManager.Request(Uri.parse(url)).apply {
+                addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, safeDownloadName(fileName))
+            }
+            (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+            true
+        }.getOrDefault(false)
 
         /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
         @JavascriptInterface

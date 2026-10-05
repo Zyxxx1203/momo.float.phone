@@ -11,6 +11,8 @@ type FloatShellBridge = {
     saveBase64File?: (fileName: string, base64: string) => boolean;
     openUrl?: (url: string) => boolean;
     launchExternalApp?: (packageName: string, dataUrl: string) => boolean;
+    /** 直链交给系统下载管理器（真后台）；返回是否成功入队 */
+    downloadUrl?: (url: string, fileName: string) => boolean;
 };
 
 function readFloatShellBridge(): FloatShellBridge | null {
@@ -133,7 +135,37 @@ function blobToBase64(blob: Blob): Promise<string> {
     });
 }
 
+/**
+ * 把 http(s) 直链交给壳的系统下载管理器（DownloadManager）：系统托管，
+ * 切后台、锁屏、退出 App 都会继续下载，完成后通知栏提示。
+ * 非壳环境、非直链、或入队失败时返回 false，由调用方走原有兜底路径。
+ */
+export function downloadUrlInFloatShell(url: string, filename: string): boolean {
+    const bridge = readFloatShellBridge();
+    if (!bridge?.downloadUrl) return false;
+    if (!/^https?:\/\//i.test(url)) return false;
+    try {
+        return bridge.downloadUrl(url, filename);
+    } catch {
+        return false;
+    }
+}
+
+/** 把站内相对地址补成绝对地址（壳的原生下载器拿不到页面 base，必须给完整 URL）。 */
+function toAbsoluteUrl(url: string): string {
+    if (/^https?:\/\//i.test(url)) return url;
+    try {
+        return new URL(url, window.location.href).href;
+    } catch {
+        return url;
+    }
+}
+
 export async function downloadUrl(url: string, filename: string): Promise<void> {
+    // 直链优先走壳的原生下载：页面里的 fetch→blob 一旦进后台就被暂停，
+    // 交给系统下载器才能真正「离开界面继续下」。
+    if (downloadUrlInFloatShell(toAbsoluteUrl(url), filename)) return;
+
     let blob: Blob | null = null;
 
     try {

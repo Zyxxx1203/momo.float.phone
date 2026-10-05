@@ -12,6 +12,9 @@
     <!-- 通话按住说话/语音条录音、视频通话摄像头（WebView getUserMedia 需要壳侧转授） -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 导出文件写公共「下载」目录：Android 10+ 走 MediaStore 免权限，仅 8/9 需要 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
@@ -32,6 +35,14 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- 深链：外部 App（如桌宠）用 floatshell://open?url=<站内地址> 唤起本壳并直达指定页面。
+                 目标地址仍受 SITE_URL 前缀校验，只能开自己的站点。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="floatshell" />
             </intent-filter>
         </activity>
 

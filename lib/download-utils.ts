@@ -3,6 +3,53 @@ export type DownloadFileOptions = {
     nativeShareOnly?: boolean;
 };
 
+/** android-shell 壳的 WebView UA 后缀标识（见 MainActivity.kt 的 userAgentString 拼接）。 */
+const FLOAT_SHELL_UA_MARK = "FloatShell/";
+
+/** 壳暴露的原生桥（能力按需特性检测，非壳环境为 undefined）。 */
+type FloatShellBridge = {
+    saveBase64File?: (fileName: string, base64: string) => boolean;
+    openUrl?: (url: string) => boolean;
+    launchExternalApp?: (packageName: string, dataUrl: string) => boolean;
+};
+
+function readFloatShellBridge(): FloatShellBridge | null {
+    if (typeof window === "undefined" || typeof navigator === "undefined") return null;
+    if (!navigator.userAgent.includes(FLOAT_SHELL_UA_MARK)) return null;
+    return (window as unknown as { AndroidShell?: FloatShellBridge }).AndroidShell ?? null;
+}
+
+/** 是否运行在 android-shell 壳内（普通浏览器/iOS 均为 false）。 */
+export function isFloatShell(): boolean {
+    return readFloatShellBridge() !== null;
+}
+
+/**
+ * 用壳的桥能力打开外部 App / URL（桌宠联动）。
+ * 优先按自定义 scheme 走 ACTION_VIEW（对方声明了 intent-filter 即可，不要求正在运行），
+ * 失败时退回按包名唤起。非壳环境返回 false，调用方自行兜底。
+ */
+export function openInFloatShell(url: string, packageName?: string): boolean {
+    const bridge = readFloatShellBridge();
+    if (!bridge) return false;
+    const direct = bridge.openUrl;
+    if (direct) {
+        try {
+            if (direct(url)) return true;
+        } catch {
+            // 落到包名唤起
+        }
+    }
+    if (packageName && bridge.launchExternalApp) {
+        try {
+            return bridge.launchExternalApp(packageName, url);
+        } catch {
+            return false;
+        }
+    }
+    return false;
+}
+
 export function isAndroidBrowser(): boolean {
     return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
 }
@@ -53,8 +100,37 @@ export async function downloadFile(blob: Blob, filename: string, options: Downlo
         throw new Error("当前浏览器没有成功打开系统分享，请在 Safari 中重试，或导出轻量备份后再试。");
     }
 
+    // 壳环境：blob: + a[download] 在 WebView 里不会落盘（DownloadManager 取不到内存地址），
+    // 必须把内容 base64 交给壳从 MediaStore 写进公共「下载」目录。落盘失败再退回浏览器做法。
+    const shell = readFloatShellBridge();
+    if (shell?.saveBase64File) {
+        try {
+            const base64 = await blobToBase64(blob);
+            if (shell.saveBase64File(filename, base64)) {
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                return;
+            }
+        } catch {
+            // 交给下面的浏览器兜底路径
+        }
+    }
+
     anchorDownload();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Blob → 纯 base64（去掉 data URL 前缀），供壳的 saveBase64File 使用。 */
+function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || "");
+            const comma = result.indexOf(",");
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error ?? new Error("读取文件内容失败"));
+        reader.readAsDataURL(blob);
+    });
 }
 
 export async function downloadUrl(url: string, filename: string): Promise<void> {

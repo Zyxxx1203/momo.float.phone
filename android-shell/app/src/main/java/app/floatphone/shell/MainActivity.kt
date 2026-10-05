@@ -3,6 +3,7 @@ package app.floatphone.shell
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,7 +12,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
+import android.util.Base64
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
@@ -31,6 +34,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Float 小手机安卓壳：全屏 WebView 直接加载线上站点。
@@ -40,9 +45,11 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.1"
+        const val VERSION = "1.0.2"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
+        /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
+        const val DEEP_LINK_SCHEME = "floatshell"
     }
 
     private lateinit var rootContainer: FrameLayout
@@ -224,10 +231,24 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl(target)
     }
 
+    /**
+     * 取出本次要加载的站内地址。两个来源：
+     * 1. 内部深链（来电接听）走 EXTRA_OPEN_URL；
+     * 2. 外部 App 走 floatshell://open?url=… 的 Intent.data。
+     * 无论哪个来源都必须以 SITE_URL 开头，防止被外部应用指到任意网址。
+     * 取走后清空，避免配置变更重建时重复加载。
+     */
     private fun consumeOpenUrl(intent: Intent?): String? {
-        val target = intent?.getStringExtra(EXTRA_OPEN_URL) ?: return null
+        if (intent == null) return null
+        val extra = intent.getStringExtra(EXTRA_OPEN_URL)
         intent.removeExtra(EXTRA_OPEN_URL)
-        return target.takeIf { it.startsWith(SITE_URL) }
+        if (extra != null) return extra.takeIf { it.startsWith(SITE_URL) }
+        val data = intent.data
+        if (data != null && data.scheme == DEEP_LINK_SCHEME) {
+            intent.data = null
+            return data.getQueryParameter("url").orEmpty().takeIf { it.startsWith(SITE_URL) }
+        }
+        return null
     }
 
     /**
@@ -354,5 +375,91 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+
+        /**
+         * 把 base64 内容写入公共「下载」目录（导出备份、导出数据用）。
+         *
+         * 为什么必须走这里：网页导出走的是 blob: + a[download]，而 WebView 的
+         * DownloadListener 拿到 blob: 时 DownloadManager 取不到内存地址，
+         * 页面上既没落盘也没有任何提示。所以页面把内容 base64 交给壳来落盘。
+         * Android 10+ 走 MediaStore 不需要任何权限；8/9 需要 WRITE_EXTERNAL_STORAGE
+         * （Manifest 里已用 maxSdkVersion=28 限定）。
+         * 返回是否写入成功；文件名里的非法字符会被替换，避免路径穿越。
+         */
+        @JavascriptInterface
+        fun saveBase64File(fileName: String, base64: String): Boolean = runCatching {
+            val safeName = fileName
+                .replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                .trim()
+                .ifBlank { "download" }
+                .take(120)
+            val bytes = Base64.decode(base64, Base64.DEFAULT)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                    put(MediaStore.Downloads.MIME_TYPE, guessMimeType(safeName))
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return@runCatching false
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: return@runCatching false
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!dir.exists()) dir.mkdirs()
+                FileOutputStream(File(dir, safeName)).use { it.write(bytes) }
+            }
+            true
+        }.getOrDefault(false)
+
+        /**
+         * 打开另一个 App（桌宠联动用）。给出目标包名；可选的 dataUrl 会作为
+         * Intent.data 带上（对方 Activity 的 intent-filter 能收到）。
+         * 返回是否成功发起跳转——目标未安装时返回 false，页面据此提示。
+         */
+        @JavascriptInterface
+        fun launchExternalApp(packageName: String, dataUrl: String): Boolean = runCatching {
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+                ?: return@runCatching false
+            if (dataUrl.isNotBlank()) intent.data = Uri.parse(dataUrl)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            true
+        }.getOrDefault(false)
+
+        /**
+         * 用 ACTION_VIEW 打开任意 URL / 自定义 scheme（如桌宠的 deskpet://xxx）。
+         * 与 launchExternalApp 的区别：这条路不绑定包名，由系统按 scheme 匹配目标，
+         * 对方只需在 Manifest 里声明对应的 intent-filter——是跨 App 联动的推荐方式，
+         * 而且对方没在运行时也能把它的入口 Activity 拉起来。
+         */
+        @JavascriptInterface
+        fun openUrl(url: String): Boolean = runCatching {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            true
+        }.getOrDefault(false)
+    }
+
+    /** 按扩展名猜 MIME，MediaStore 用；猜不中给通用二进制。 */
+    private fun guessMimeType(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {
+        "json" -> "application/json"
+        "zip" -> "application/zip"
+        "txt" -> "text/plain"
+        "md" -> "text/markdown"
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "mp4" -> "video/mp4"
+        else -> "application/octet-stream"
     }
 }

@@ -1015,6 +1015,51 @@ $CRON$)`);
       return json({ ok: true, commands: rows.map(toPublicShortcutCommand) });
     }
 
+    if (action === "diagnose" && request.method === "GET") {
+      // 一键自检：把离线推送链路上每个「可能断掉的点」都查一遍，返回结构化结果，
+      // 免去用户逐张表翻看、逐处猜测。只读，不产生任何副作用。
+      const config = await loadConfig();
+      const allSubs = await readJson(await rest(
+        "push_subscriptions?select=endpoint,user_id&limit=50",
+      ));
+      const recentJobs = await readJson(await rest(
+        "push_jobs?select=kind,status,result_note,execute_at&order=created_at.desc&limit=20",
+      ));
+      const nowMs = Date.now();
+      const overdue = recentJobs.filter(job => (
+        job.status === "pending" || job.status === "running"
+      ) && Date.parse(job.execute_at) < nowMs - 3 * 60_000);
+
+      const shellSubs = allSubs.filter(sub => sub.endpoint.startsWith("shell:"));
+      const webSubs = allSubs.filter(sub => !sub.endpoint.startsWith("shell:"));
+      const lastDone = recentJobs.find(job => job.status === "done" || job.status === "failed");
+      const noSubHits = recentJobs.filter(job => job.result_note === "no_subscription").length;
+
+      return json({
+        ok: true,
+        config: {
+          hasVapidPublic: Boolean(config.vapid_public_key),
+          hasVapidPrivate: Boolean(config.vapid_private_key),
+          hasPayloadKey: Boolean(config.payload_key),
+          hasCronSecret: Boolean(config.cron_secret),
+          siteOrigin: config.site_origin || null,
+        },
+        subscriptions: {
+          total: allSubs.length,
+          shell: shellSubs.map(sub => ({ endpoint: sub.endpoint, userId: sub.endpoint.slice("shell:".length) })),
+          web: webSubs.length,
+        },
+        jobs: {
+          total: recentJobs.length,
+          pending: recentJobs.filter(job => job.status === "pending").length,
+          overdue: overdue.length,
+          lastResult: lastDone?.result_note ?? null,
+          lastKind: lastDone?.kind ?? null,
+          noSubscriptionCount: noSubHits,
+        },
+      });
+    }
+
     if (action === "test" && request.method === "POST") {
       const config = await loadConfig();
       // 订阅来源有两处：本网关以 OWNER_ID 写入的 Web Push 订阅，以及站点以自身

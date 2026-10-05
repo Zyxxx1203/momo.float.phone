@@ -576,7 +576,13 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const subsResponse = await rest(`push_subscriptions?user_id=eq.${encodeURIComponent(job.user_id)}&select=endpoint,p256dh,auth`);
+    // 订阅有两个来源、两套 user_id：壳合成订阅由站点以自身账号 id 注册
+    // （单机自部署下是 local_user），而任务一律挂在 OWNER_ID(owner) 下。
+    // 按 job.user_id 过滤会把壳订阅整个漏掉，于是生成阶段就误判「没有订阅」
+    // 直接放弃（result_note 记 no_subscription），用户永远等不到主动消息——
+    // 连 LLM 都不会被调用。个人云只服务本项目唯一的主人，这里取全部订阅；
+    // 是否为壳订阅由 endpoint 前缀在投递阶段分流（见下方 webSubs / shellTopics）。
+    const subsResponse = await rest("push_subscriptions?select=endpoint,p256dh,auth");
     const subs = subsResponse.ok ? await subsResponse.json() as SubscriptionRow[] : [];
     if (subs.length === 0 && payload.weixin?.force !== true) {
       await finish("done", "no_subscription");

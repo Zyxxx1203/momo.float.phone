@@ -152,6 +152,14 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(Intent.ACTION_VIEW, url)); true
                 }.getOrDefault(true)
             }
+
+            // 页面每次完成加载（含 SPA 首载、手动刷新）都补一次状态栏高度注入：
+            // JS bridge 在页面脚本跑之前就已可用，但页面自己的监听器需要这一手动触发兜底，
+            // 避免"注入发生在页面还没准备好接收"的时序错过。
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                injectStatusBarHeight()
+            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -231,6 +239,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * 隐藏系统状态栏（沉浸式）：页面自带虚拟状态栏，系统那条纯属多余。
+     * decorFitsSystemWindows=false 时 WebView 本就铺满全屏，这里只负责隐掉系统状态栏那一条；
+     * 键盘避让改由 observeWindowInsets() 里的 IME 内边距接管。
+     * 从屏幕顶部下滑可临时唤出系统状态栏，松手自动再隐藏。
+     */
+    /**
      * 允许窗口画进刘海/挖孔区域。
      *
      * 隐藏状态栏后，LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT 只允许内容进入「仍被系统栏盖住」
@@ -247,12 +261,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * 隐藏系统状态栏（沉浸式）：页面自带虚拟状态栏，系统那条纯属多余。
-     * decorFitsSystemWindows=false 时 WebView 本就铺满全屏，这里只负责隐掉系统状态栏那一条；
-     * 键盘避让交由 observeWindowInsets() 的 IME 内边距接管。
-     * 从屏幕顶部下滑可临时唤出系统状态栏，松手自动再隐藏。
-     */
     private fun hideSystemStatusBar() {
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.statusBars())
@@ -261,17 +269,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 统一处理 WindowInsets：实测状态栏高度（供桥查询） + 键盘（IME）避让。
-     * 两者都必须在 decorFitsSystemWindows=false 的前提下由 App 自己接管。
+     * 监听真实状态栏高度（物理像素，经 WindowInsets 实测，隐藏状态栏后依然能拿到原始尺寸）。
+     * 不同机型/异形屏/系统字体缩放都会让这个值跟 CSS 的 env(safe-area-inset-top) 估算不一致，
+     * 页面自己猜不准——所以由壳实测后用 JS 注入，页面只管用，不用再猜。
      */
     private fun observeWindowInsets() {
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
-            // 状态栏真实高度：必须用 getInsetsIgnoringVisibility。状态栏已被
-            // hideSystemStatusBar() 隐藏，getInsets() 只返回"当前可见"的栏尺寸，隐藏后恒为 0。
-            // 如今仅作为 ShellBridge.getStatusBarHeightPx() 的查询值留存（页面不再据此补位）。
+            // 必须用 getInsetsIgnoringVisibility：状态栏已被 hideSystemStatusBar() 隐藏，
+            // getInsets() 只返回"当前可见"的栏尺寸，隐藏后恒为 0——这正是此前注入链路
+            // 失效（诊断条上 bridge 值 0、CSS/行内值皆空）、页面顶部露出黑块的根因。
             val statusBarPx = insets
                 .getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars()).top
-            statusBarHeightCssPx = (statusBarPx / resources.displayMetrics.density).toInt()
+            val density = resources.displayMetrics.density
+            val cssPx = (statusBarPx / density).toInt()
+            if (cssPx > 0 && cssPx != statusBarHeightCssPx) {
+                statusBarHeightCssPx = cssPx
+                injectStatusBarHeight()
+            }
 
             // 键盘避让：setDecorFitsSystemWindows(false) 后 adjustResize 不再由系统代劳，
             // 网页侧 interactiveWidget("resizes-content") 在 WebView 里同样不生效，
@@ -284,6 +298,14 @@ class MainActivity : AppCompatActivity() {
             }
             insets
         }
+    }
+
+    /** 把实测状态栏高度（CSS px）写入页面根元素的 CSS 变量，供 phone-shell.css 的 --status-bar-drop 消费。 */
+    private fun injectStatusBarHeight() {
+        if (!::webView.isInitialized || statusBarHeightCssPx <= 0) return
+        val js = "document.documentElement.style.setProperty('--android-shell-status-bar-height', '${statusBarHeightCssPx}px');" +
+            "window.dispatchEvent(new CustomEvent('floatshell-statusbarheight', { detail: $statusBarHeightCssPx }));"
+        webView.evaluateJavascript(js, null)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -314,7 +336,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun getVersion(): String = VERSION
 
-        /** 实测系统状态栏高度（CSS px）。仅供页面需要时查询，壳不再主动注入 CSS 变量。 */
+        /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
         @JavascriptInterface
         fun getStatusBarHeightPx(): Int = statusBarHeightCssPx
 

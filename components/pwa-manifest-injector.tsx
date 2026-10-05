@@ -4,18 +4,57 @@ import { useEffect } from "react";
 
 import { getRuntimePwaDisplayMode, readPwaDisplayPreference, PWA_DISPLAY_MODE_CHANGED_EVENT } from "@/lib/pwa-display-mode";
 
+/** android-shell 壳的 WebView UA 后缀标识（见 MainActivity.kt 的 userAgentString 拼接）。 */
+const FLOAT_SHELL_UA_MARK = "FloatShell/";
+
+type AndroidShellBridge = {
+  getStatusBarHeightPx?: () => number;
+};
+
+function readAndroidShellBridge(): AndroidShellBridge | null {
+  const bridge = (window as unknown as { AndroidShell?: AndroidShellBridge }).AndroidShell;
+  return bridge ?? null;
+}
+
 /**
- * 壳环境不再做「状态栏占位上移」补位。
- *
- * 早期壳在隐藏系统状态栏后画不进挖孔区，页面顶部会露出一条黑边，于是用壳实测的
- * 状态栏高度去顶 --status-bar-drop、把整块画面上移。现在壳侧已用
- * decorFitsSystemWindows=false + 挖孔区 shortEdges 让 WebView 真正铺满整屏，
- * 视口就从物理屏幕顶边开始，再上移只会裁掉虚拟状态栏、底部露白。
- * --status-bar-drop 交回给「主题 → 状态栏」的手动微调（默认 0）。
+ * android-shell 的 WebView 隐藏了系统状态栏，但网页内容画不进那块物理安全区——
+ * 页面自己的虚拟状态栏会被晾在屏幕最顶，与系统状态栏区域重叠/错位，表现为顶部一块异色区域。
+ * 壳侧（MainActivity.kt）实测真实状态栏高度后用 JS 注入 --android-shell-status-bar-height，
+ * 这里接住它并同步写成 phone-shell.css 消费的 --status-bar-drop，不依赖用户手动调参数。
+ * 非 FloatShell 壳环境（普通浏览器/iOS）完全不触发，--status-bar-drop 保持默认 0px。
  */
+function applyAndroidShellStatusBarDrop(): (() => void) | void {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return;
+  if (!navigator.userAgent.includes(FLOAT_SHELL_UA_MARK)) return;
+
+  const root = document.documentElement;
+  const setDrop = (px: number) => {
+    if (px > 0) root.style.setProperty("--status-bar-drop", `${px}px`);
+  };
+
+  // 事件注入路径：壳在 onPageFinished / insets 变化时主动 dispatch，覆盖首载与旋转等场景。
+  const handleStatusBarHeightEvent = (event: Event) => {
+    const detail = (event as CustomEvent<number>).detail;
+    if (typeof detail === "number") setDrop(detail);
+  };
+  window.addEventListener("floatshell-statusbarheight", handleStatusBarHeightEvent);
+
+  // 兜底：JS bridge 可能比事件先就位，主动查一次当前值（壳未实测完时返回 0，被 setDrop 忽略）。
+  const bridge = readAndroidShellBridge();
+  if (bridge?.getStatusBarHeightPx) {
+    try {
+      setDrop(bridge.getStatusBarHeightPx());
+    } catch {
+      // bridge 调用异常时静默忽略，保持默认 0px，不影响非壳环境
+    }
+  }
+
+  return () => window.removeEventListener("floatshell-statusbarheight", handleStatusBarHeightEvent);
+}
 
 export function PWAManifestInjector() {
   useEffect(() => {
+    const cleanupStatusBarDrop = applyAndroidShellStatusBarDrop();
     const root = document.documentElement;
     const displayModeQueries = ["fullscreen", "standalone", "minimal-ui"].map(mode => (
       window.matchMedia(`(display-mode: ${mode})`)
@@ -51,6 +90,7 @@ export function PWAManifestInjector() {
     displayModeQueries.forEach(query => query.addEventListener("change", syncRuntimeDisplayMode));
 
     return () => {
+      cleanupStatusBarDrop?.();
       document.removeEventListener("fullscreenchange", syncRuntimeDisplayMode);
       window.removeEventListener("pageshow", syncRuntimeDisplayMode);
       window.removeEventListener(PWA_DISPLAY_MODE_CHANGED_EVENT, handleSettingsChanged);

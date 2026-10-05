@@ -1017,8 +1017,11 @@ $CRON$)`);
 
     if (action === "test" && request.method === "POST") {
       const config = await loadConfig();
+      // 订阅来源有两处：本网关以 OWNER_ID 写入的 Web Push 订阅，以及站点以自身
+      // 账号 id（单机自部署下是 local_user）写入的壳合成订阅。只按 OWNER_ID 过滤
+      // 会把壳订阅整个漏掉，App 里点「测试」便永远得到「请先开启离线推送」。
       const subscriptions = await readJson<SubscriptionRow[]>(await rest(
-        `push_subscriptions?user_id=eq.${OWNER_ID}&select=endpoint,p256dh,auth`,
+        "push_subscriptions?select=endpoint,p256dh,auth",
       ));
       if (subscriptions.length === 0) return json({ ok: false, error: "请先开启离线推送。" }, 400);
       await new Promise(resolve => setTimeout(resolve, 6000));
@@ -1033,7 +1036,33 @@ $CRON$)`);
       });
       let sent = 0;
       const errors: string[] = [];
-      for (const subscription of subscriptions) {
+      // 壳订阅（endpoint = shell:<站点账号 id>）不走 Web Push，改由 Realtime 广播
+      // 送达壳内长连接——与 push-generate 同一套寻址方式，不掺 user_id。
+      const shellSubs = subscriptions.filter(sub => sub.endpoint.startsWith("shell:"));
+      const webSubs = subscriptions.filter(sub => !sub.endpoint.startsWith("shell:"));
+      for (const subscription of shellSubs) {
+        const shellUserId = subscription.endpoint.slice("shell:".length).trim();
+        if (!shellUserId) continue;
+        try {
+          const response = await fetch(`${supabaseUrl}/realtime/v1/api/broadcast`, {
+            method: "POST",
+            headers: restHeaders,
+            body: JSON.stringify({
+              messages: [{
+                topic: `shellpush:${shellUserId}`,
+                event: "notify",
+                payload: { title: "小手机", body: "个人 Supabase 离线推送已连通。", url: "/" },
+              }],
+            }),
+          });
+          await response.text().catch(() => undefined);
+          if (response.ok) sent += 1;
+          else errors.push(`shell http ${response.status}`);
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      for (const subscription of webSubs) {
         try {
           const status = await sendWebPushRaw(subscription, payload, {
             publicKey: config.vapid_public_key,

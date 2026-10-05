@@ -1079,7 +1079,19 @@ Deno.serve(async (req: Request) => {
     // 安卓壳（FloatShell App）的合成订阅（endpoint 以 shell: 开头）不走 Web Push，
     // 改由 Supabase Realtime 广播送达壳内长连接。
     const webSubs = subs.filter(sub => !sub.endpoint.startsWith("shell:"));
-    const hasShellSub = webSubs.length < subs.length;
+    // 壳订阅由站点按站点账号 id 注册（单机自部署下是 local_user），而个人云的任务
+    // 一律挂在 OWNER_ID(owner) 下——按 job.user_id 过滤永远取不到壳那行，
+    // hasShellSub 恒为 false，下面的广播整段被跳过：消息生成成功、写得进 outbox，
+    // 却永远弹不出通知。壳订阅本就只属于本项目唯一的主人，按 endpoint 前缀单独取，
+    // 不掺 user_id；topic 也改用 endpoint 里带的站点 id，与壳实际订阅的频道一致。
+    const shellSubsResponse = await rest("push_subscriptions?endpoint=like.shell:*&select=endpoint&limit=50");
+    const shellTopics = (shellSubsResponse.ok
+      ? await shellSubsResponse.json() as { endpoint: string }[]
+      : [])
+      .map(sub => String(sub.endpoint || "").slice("shell:".length).trim())
+      .filter(Boolean)
+      .map(userId => `shellpush:${userId}`);
+    const hasShellSub = shellTopics.length > 0;
     const vapid = vapidRow
       ? { publicKey: vapidRow.vapid_public_key, privateKey: vapidRow.vapid_private_key, subject: siteOrigin || "mailto:push@ai-phone.local" }
       : null;
@@ -1128,8 +1140,8 @@ Deno.serve(async (req: Request) => {
             method: "POST",
             headers: restHeaders,
             body: JSON.stringify({
-              messages: [{
-                topic: `shellpush:${job.user_id}`,
+              messages: shellTopics.map(topic => ({
+                topic,
                 event: "notify",
                 payload: {
                   title: deliverAsCall ? `📞 ${title}` : title,
@@ -1138,7 +1150,7 @@ Deno.serve(async (req: Request) => {
                   // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容
                   ...(deliverAsCall ? { kind: "call", characterName: title, sessionId: callSessionId, callTs: Date.now() } : {}),
                 },
-              }],
+              })),
             }),
           });
           await response.text().catch(() => undefined);

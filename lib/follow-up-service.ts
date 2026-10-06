@@ -583,6 +583,23 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = Math.max(1, Math.round((Date.now() - lastUserAt) / 60000));
 
+        // 服务端在 fireAt+15s 就会动手，而本地轮询间隔 60s——服务端先生成是常态。
+        // 若它已经生成并推送过这一轮，就不要再本地跑第二遍：否则通知栏（服务端内容）
+        // 和聊天里（本地内容）会是两次不同的模型输出，两边完全对不上。
+        // 先把服务端已生成的结果并进聊天，并到了就到此为止。
+        const assistantBefore = loadChatMessages(session.id).filter(m => m.role === "assistant").length;
+        await import("./push-outbox-client")
+            .then(m => m.consumeServerOutbox({ force: true }))
+            .catch(() => undefined);
+        if (loadChatMessages(session.id).filter(m => m.role === "assistant").length > assistantBefore) {
+            // 不再手动 markIdleReconnectFired / armIdleReconnectBailout：
+            // consumeServerOutbox 合并 idle 条目时已经计过连发次数，而 markIdleReconnectFired
+            // 内部的 saveRules 会广播 BAILOUT_DIRTY_EVENT 触发重挂。这里再调一次会
+            // 让连发次数翻倍（上限 3，直接少发一轮），也会重复挂单。
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
+            return;
+        }
+
         backgroundGeneratingSessions.add(session.id);
         window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
 
@@ -640,6 +657,17 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
 
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = resolveTimedWakeElapsedMinutes(sched, latestMessages, Date.now());
+
+        // 同冷场重连：服务端常常先于本地生成，先把它那轮并进来，避免通知与聊天
+        // 各是两次不同的模型输出。
+        const assistantBeforeWake = loadChatMessages(session.id).filter(m => m.role === "assistant").length;
+        await import("./push-outbox-client")
+            .then(m => m.consumeServerOutbox({ force: true }))
+            .catch(() => undefined);
+        if (loadChatMessages(session.id).filter(m => m.role === "assistant").length > assistantBeforeWake) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
+            return;
+        }
 
         console.log("[TimedWake] Dispatching followup-started for session:", session.id);
         backgroundGeneratingSessions.add(session.id);

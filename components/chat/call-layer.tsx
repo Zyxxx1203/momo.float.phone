@@ -53,17 +53,24 @@ export function CallLayer() {
             .map(id => allCharacters.find(item => item.id === id))
             .filter((item): item is NonNullable<typeof item> => Boolean(item));
         if (members.length === 0) return null;
+        const groupProps = {
+            key: call.callId,
+            type: call.kind,
+            session,
+            characters: members,
+            initiator: call.initiator,
+            initiatorName: call.initiatorName,
+            minimized: call.minimized,
+            onMinimize: minimizeCall,
+            onRestore: restoreCall,
+            onEnd: endCall,
+        };
+        // 缩成小窗时不套全屏容器：小窗由 portal 挂到 body，
+        // 而这层空壳会盖住整个桌面、挡住下面对手机的操作。
+        if (call.minimized) return <GroupCallScreen {...groupProps} />;
         return (
             <div className="absolute inset-0 z-[100]">
-                <GroupCallScreen
-                    key={call.callId}
-                    type={call.kind}
-                    session={session}
-                    characters={members}
-                    initiator={call.initiator}
-                    initiatorName={call.initiatorName}
-                    onEnd={endCall}
-                />
+                <GroupCallScreen {...groupProps} />
             </div>
         );
     }

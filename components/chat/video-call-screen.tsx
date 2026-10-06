@@ -23,6 +23,7 @@ import { isAndroidBrowser, isIOSDevice } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
+import { CallMiniWindow } from "./call-mini-window";
 
 // ── Types ───────────────────────────────────────────
 
@@ -634,17 +635,13 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     if (minimized) {
         return (
-            <button
-                type="button"
-                className="call-mini-window"
-                style={{ backgroundImage: `url(${bgImageResolved || character.avatar || ""})` }}
-                onClick={onRestore}
-                aria-label={`返回与${character.name}的视频通话`}
-                title="点击返回通话"
-            >
-                <span className="call-mini-window-overlay" />
-                <span className="call-mini-window-name">{character.name}</span>
-            </button>
+            <CallMiniWindow
+                imageUrl={bgImageResolved || character.avatar || null}
+                title={character.name}
+                subtitle="视频通话"
+                ariaLabel={`返回与${character.name}的视频通话`}
+                onRestore={onRestore}
+            />
         );
     }
 

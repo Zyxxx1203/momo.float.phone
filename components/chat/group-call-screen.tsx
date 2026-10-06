@@ -20,6 +20,7 @@ import { isAndroidBrowser, isIOSDevice } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
+import { CallMiniWindow } from "./call-mini-window";
 
 // ── Types ───────────────────────────────────────────
 
@@ -53,11 +54,17 @@ type GroupCallScreenProps = {
     onEnd: () => void;
     initiator?: "user" | "character";
     initiatorName?: string; // 发起通话的角色名（initiator="character" 时使用）
+    /** 通话是否处于缩小的悬浮窗状态：通话继续（识别/播放/计时不停），界面缩为小窗 */
+    minimized?: boolean;
+    /** 点击左上角返回键：请求缩小为悬浮窗（通话继续，不挂断） */
+    onMinimize?: () => void;
+    /** 点击悬浮窗：请求恢复为全屏通话界面 */
+    onRestore?: () => void;
 };
 
 // ── Component ───────────────────────────────────────
 
-export function GroupCallScreen({ type, session, characters, onEnd, initiator = "user", initiatorName }: GroupCallScreenProps) {
+export function GroupCallScreen({ type, session, characters, onEnd, initiator = "user", initiatorName, minimized = false, onMinimize, onRestore }: GroupCallScreenProps) {
     // 同 voice-call-screen：iOS 保留 Web Speech 免提 + Web Audio 播放；
     // 其余设备改按住说话 + 云端转写，播放走媒体元素。没配识别时回落旧行为。
     const iosDeviceRef = useRef(isIOSDevice());
@@ -649,6 +656,21 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         return <div className="ts-14 opacity-70">通话已结束</div>;
     };
 
+    // ── MINIMIZED (悬浮窗) ──────────────────────────
+    // 与单聊一致：缩成小窗后通话继续，点一下回全屏。群聊没有单一角色，
+    // 背景优先用会话背景，其次取首位成员头像。
+    if (minimized) {
+        return (
+            <CallMiniWindow
+                imageUrl={voiceBgResolved || resolvedBgs[characters[0]?.id || ""] || characters[0]?.avatar || null}
+                title={`群${callTypeLabel}`}
+                subtitle={`${characters.length + 1}人`}
+                ariaLabel={`返回群${callTypeLabel}`}
+                onRestore={onRestore}
+            />
+        );
+    }
+
     // ── VIDEO MODE RENDER ───────────────────────────
     if (isVideo) {
         // Grid: participants + self-cam — auto layout to fit screen
@@ -659,6 +681,19 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         return (
             <div className="gcall-video-root voicecall-controls call-keyboard-shift" style={keyboardOffsetStyle}>
                 <CallVolumeControl />
+                {onMinimize && callState !== "ENDED" && callState !== "CONNECTING" && (
+                    <button
+                        type="button"
+                        className="call-back-btn"
+                        onClick={onMinimize}
+                        aria-label="缩小通话"
+                        title="缩小通话"
+                    >
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                    </button>
+                )}
                 {/* Video grid */}
                 <div
                     className="flex-1 min-h-0 grid gap-[2px] overflow-hidden"
@@ -759,6 +794,20 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             <div className="call-overlay" {...(voiceBgResolved ? { "data-has-image": "" } : {})} />
 
             <CallVolumeControl />
+
+            {onMinimize && callState !== "ENDED" && callState !== "CONNECTING" && (
+                <button
+                    type="button"
+                    className="call-back-btn"
+                    onClick={onMinimize}
+                    aria-label="缩小通话"
+                    title="缩小通话"
+                >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M15 18l-6-6 6-6" />
+                    </svg>
+                </button>
+            )}
 
             <div className="gcall-body voicecall-controls">
                 {/* Top bar */}

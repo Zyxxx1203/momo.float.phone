@@ -26,6 +26,7 @@ import {
 import { connectPersonalPushCloud, deployPersonalPushCloud, isPersonalPushCloudActive } from "@/lib/personal-push-cloud";
 import { ensurePersonalPushSubscription, getOfflinePushState, markAccountPushSubscribed } from "@/lib/push-client";
 import { diagnoseScheduledBailouts } from "@/lib/push-bailout-diagnostics";
+import { formatSelfCheckReport, runOfflinePushSelfCheck } from "@/lib/push-selfcheck";
 import { getWeixinCloudDeployedAt, markWeixinCloudDeployed, savePushCloudScheduled, saveWeixinCloudScheduled } from "@/lib/cloud-deploy-status";
 import { Input, Select } from "@/components/ui/form";
 
@@ -151,10 +152,9 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
     const [connectOpen, setConnectOpen] = useState(false);
     const [connectUrl, setConnectUrl] = useState("");
     const [connectKey, setConnectKey] = useState("");
-    // 离线预约诊断：把「为什么没挂上服务端任务」逐条摊开。
-    // 这些原因在正常的刷新流程里是被静默丢弃的，只有这里能看到。
-    const [diagnosing, setDiagnosing] = useState(false);
-    const [diagnoseText, setDiagnoseText] = useState<string | null>(null);
+    // 一键排查：把「哪一段断了」变成可见结论，而不是反复猜。
+    const [checking, setChecking] = useState(false);
+    const [checkText, setCheckText] = useState<string | null>(null);
 
     useEffect(() => {
         setCloudReady(isCloudBackupConfigured(loadCloudBackupConfig()));
@@ -431,18 +431,32 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         }
     };
 
-    /** 逐项重跑离线预约并把每一步的结论摊开（含失败的具体原因）。 */
-    const runDiagnose = async () => {
-        if (diagnosing) return;
-        setDiagnosing(true);
+    /**
+     * 一键排查：先跑服务端链路自检（配置/账号/订阅/任务表/回传箱/真实广播），
+     * 再跑本机预约诊断（主动消息规则有没有挂上去）。两者合起来覆盖整条链。
+     */
+    const runFullCheck = async () => {
+        if (checking) return;
+        setChecking(true);
         setResultDialog(null);
+        const sections: string[] = [];
         try {
-            const text = await diagnoseScheduledBailouts();
-            setDiagnoseText(text);
-        } catch (err) {
-            setDiagnoseText(`诊断失败：${err instanceof Error ? err.message : String(err)}`);
+            try {
+                const result = await runOfflinePushSelfCheck(true);
+                sections.push(formatSelfCheckReport(result));
+            } catch (err) {
+                sections.push(`离线推送链路自检失败：${err instanceof Error ? err.message : String(err)}`);
+            }
+            sections.push("");
+            sections.push("─── 本机主动消息预约 ───");
+            try {
+                sections.push(await diagnoseScheduledBailouts());
+            } catch (err) {
+                sections.push(`本机预约诊断失败：${err instanceof Error ? err.message : String(err)}`);
+            }
+            setCheckText(sections.join("\n"));
         } finally {
-            setDiagnosing(false);
+            setChecking(false);
         }
     };
 
@@ -536,35 +550,42 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 {statusCard(<Satellite size={17} strokeWidth={1.9} />, "离线推送", pushActive, "已部署到你的 Supabase")}
             </div>
 
-            {/* 离线预约诊断：主动消息收不到时的第一手证据 */}
+            {/* 一键排查：逐段探测断点，输出可直接复制发人的报告 */}
             <button
                 type="button"
                 className="self-center text-[calc(12px*var(--app-text-scale,1))] font-semibold text-gray-500 underline underline-offset-2 hover:text-gray-700 disabled:opacity-40"
-                onClick={() => void runDiagnose()}
-                disabled={Boolean(busy) || diagnosing}
+                onClick={() => void runFullCheck()}
+                disabled={Boolean(busy) || checking}
             >
-                {diagnosing ? "正在诊断离线预约…" : "主动消息收不到？点这里诊断 →"}
+                {checking ? "正在逐段排查…" : "收不到主动消息？一键排查 →"}
             </button>
 
-            {/* 诊断结果：等宽、可整体选中复制 */}
-            {diagnoseText !== null && (
-                <div className="modal-overlay" data-ui="modal" onClick={() => setDiagnoseText(null)}>
+            {/* 排查报告 */}
+            {checkText !== null && (
+                <div className="modal-overlay" data-ui="modal" onClick={() => setCheckText(null)}>
                     <div
                         className="modal-dialog"
                         role="dialog"
                         aria-modal="true"
-                        aria-label="离线预约诊断结果"
+                        aria-label="离线推送排查报告"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="modal-body flex flex-col gap-2">
-                            <h3 className="modal-title">离线预约诊断</h3>
+                            <h3 className="modal-title">离线推送排查报告</h3>
                             <pre
                                 className="menu-desc !mt-0 max-h-[52vh] overflow-auto whitespace-pre-wrap rounded-[14px] bg-black/[0.03] px-3 py-2.5"
                                 style={{ wordBreak: "break-word" }}
-                            >{diagnoseText}</pre>
+                            >{checkText}</pre>
                         </div>
                         <div className="modal-footer">
-                            <button type="button" className="ui-btn ui-btn-outline" onClick={() => setDiagnoseText(null)}>
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-outline"
+                                onClick={() => { void navigator.clipboard?.writeText(checkText).catch(() => undefined); }}
+                            >
+                                复制
+                            </button>
+                            <button type="button" className="ui-btn ui-btn-primary" onClick={() => setCheckText(null)}>
                                 关闭
                             </button>
                         </div>

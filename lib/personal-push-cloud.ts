@@ -4,6 +4,7 @@ import {
   normalizeBackupUrl,
 } from "./cloud-backup/config";
 import { kvGet, kvRemove, kvSet, registerKvMigration } from "./kv-db";
+import { isShellEnvironment } from "./shell-detect";
 
 const PERSONAL_PUSH_STATE_KEY = "personal_push_cloud_state_v1";
 // 与 push-client 的账号订阅门控同一键；部署完成到独立订阅写入前必须保持关闭，

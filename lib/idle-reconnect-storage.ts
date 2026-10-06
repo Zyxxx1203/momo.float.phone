@@ -2,6 +2,7 @@
 // 计时锚定"用户最后一条消息"；角色的重连消息不重置计时，用连发计数控制；
 // 用户回复后计数清零，周期重新开始。每个角色一条规则。
 
+import { emitBailoutCancel } from "./bailout-cancel";
 import { markBailoutDirty } from "./bailout-dirty";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 
@@ -67,6 +68,10 @@ export function upsertIdleReconnectRule(rule: IdleReconnectRule): void {
 
 export function removeIdleReconnectRule(id: string): void {
     saveRules(loadIdleReconnectRules().filter(item => item.id !== id));
+    // 规则删了，服务端那条预约必须一并撤销：它有可能会自己续排下一发
+    //（「可重复」任务由 push-generate 内的 idleRepeat 分支重排），只删本地
+    // 会让通知在用户关掉之后仍一轮轮弹出来。
+    emitBailoutCancel({ prefix: `idle:${id}:` });
 }
 
 /** 记一次触发（本地触发或服务端触发回端合并时都调用）。 */

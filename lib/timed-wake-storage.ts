@@ -1,3 +1,4 @@
+import { emitBailoutCancel } from "./bailout-cancel";
 import { markBailoutDirty } from "./bailout-dirty";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 
@@ -49,11 +50,17 @@ export function saveTimedWakeSchedule(schedule: TimedWakeSchedule): void {
 }
 
 export function clearTimedWakeSchedule(sessionId: string): void {
+    // 先取出被清掉的条目，逐个撤销服务端预约——只改本地会让那条已经挂上去的
+    // 任务照常在原定时刻触发，用户看到「已经取消了，通知还是弹了」。
+    const removing = loadTimedWakeSchedules().filter(item => item.sessionId === sessionId);
     saveTimedWakeSchedules(loadTimedWakeSchedules().filter(item => item.sessionId !== sessionId));
+    for (const item of removing) emitBailoutCancel({ key: `timedwake:${item.id}` });
 }
 
 export function removeTimedWakeSchedule(id: string): void {
     saveTimedWakeSchedules(loadTimedWakeSchedules().filter(item => item.id !== id));
+    // 同上：本地删除必须同步撤销服务端预约。
+    emitBailoutCancel({ key: `timedwake:${id}` });
 }
 
 function isTimedWakeSchedule(value: unknown): value is TimedWakeSchedule {

@@ -5,6 +5,7 @@
 
 import { bgSetInterval } from "./bg-timer";
 import { BAILOUT_DIRTY_EVENT } from "./bailout-dirty";
+import { BAILOUT_CANCEL_EVENT, type BailoutCancelDetail } from "./bailout-cancel";
 import { buildChatPromptMessages } from "./chat-engine";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
 import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
@@ -654,6 +655,15 @@ export function installScheduledBailoutRefresher(): void {
         if (document.hidden) void refreshScheduledBailouts();
     });
     window.addEventListener(BAILOUT_DIRTY_EVENT, () => { void refreshScheduledBailouts(); });
+    // 规则被关闭/删除时撤销服务端预约。这是「关掉了还在弹」的唯一解：
+    // 「长时间没消息时（可重复）」的下一发由服务端自己续排，本地删除不会
+    // 让服务端停手，必须在删规则的那一刻显式 DELETE。
+    window.addEventListener(BAILOUT_CANCEL_EVENT, (event) => {
+        const detail = (event as CustomEvent<BailoutCancelDetail>).detail;
+        if (!detail) return;
+        if (detail.key) cancelBailoutKey(detail.key);
+        if (detail.prefix) void cancelBailoutPrefix(detail.prefix);
+    });
     window.setTimeout(() => { void refreshScheduledBailouts(); }, 3_000);
     // arm* 内部按 triggerKey 幂等覆盖，重复巡检只是覆盖同一行，代价极低。
     bgSetInterval(() => { void refreshScheduledBailouts(); }, 10 * 60_000);

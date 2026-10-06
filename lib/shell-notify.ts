@@ -16,7 +16,11 @@
 // 两条路都落到同一个「角色消息」通知渠道，用户在通知栏看到的是统一的系统通知。
 
 type ShellNotificationBridge = {
-    notify?: (title: string, body: string, avatarUrl: string) => boolean;
+    /**
+     * 第 4 个参数（会话 id）是后加的，用于让通知点击直达对应聊天：
+     * 旧壳只认前三个参数，多传会被忽略，不会报错——新老壳都安全。
+     */
+    notify?: (title: string, body: string, avatarUrl: string, sessionId?: string) => boolean;
 };
 
 /**
@@ -69,6 +73,7 @@ export function sendShellNotification(
     title: string,
     body: string,
     avatar?: string | null,
+    sessionId?: string | null,
 ): boolean {
     const bridge = getBridge();
     if (!bridge) return false;
@@ -78,7 +83,7 @@ export function sendShellNotification(
     lastNoticeKey = noticeKey;
     lastNoticeAt = now;
     try {
-        return bridge.notify?.(title || "小手机", body || "", normalizeAvatar(avatar)) === true;
+        return bridge.notify?.(title || "小手机", body || "", normalizeAvatar(avatar), sessionId || "") === true;
     } catch {
         // 桥调用异常（旧壳签名不匹配等）绝不能让业务逻辑崩掉
         return false;

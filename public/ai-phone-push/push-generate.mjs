@@ -1115,7 +1115,11 @@ Deno.serve(async (req: Request) => {
 
     for (let index = 0; index < parts.length; index += 1) {
       if (index > 0) await sleep(500);
-      const partBody = parts[index].slice(0, 80);
+      // 单条截断从 80 放宽到 200：分条规则与聊天记录同口径（都按双空行拆），
+      // 一一对应才是「同步」；真正让两处看起来不一致的是截断——过去稍长的消息
+      // 在通知里只剩开头一句，聊天里却是完整的。正常聊天单条远不到 200 字，
+      // 几乎不会触发截断。
+      const partBody = parts[index].slice(0, 200);
       const message = JSON.stringify({
         type: deliverAsCall ? "incoming_call" : "chat_outbox",
         title: deliverAsCall ? `📞 ${title}` : title,

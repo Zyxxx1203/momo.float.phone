@@ -78,7 +78,7 @@ function maybeAppendCallInvite(llmMessages: LLMMessage[], characterId: string): 
 }
 
 /** 追问兜底宽限：本地触发开始后有心跳续约，宽限只需覆盖「客户端整个死了」的场景。 */
-export const FOLLOWUP_BAILOUT_GRACE_MS = 15_000;
+export const FOLLOWUP_BAILOUT_GRACE_MS = 180_000;
 
 /** 发送兜底租约：心跳每 30s 一跳把接管时刻推到 now+90s，为后台定时器降频留足抖动空间。 */
 export const REPLY_BAILOUT_LEASE_MS = 90_000;

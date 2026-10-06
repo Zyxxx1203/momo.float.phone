@@ -4,6 +4,7 @@
 // buildChatPromptMessages → buildProviderRequest 链路，零新逻辑。
 
 import { bgSetInterval } from "./bg-timer";
+import { BAILOUT_DIRTY_EVENT } from "./bailout-dirty";
 import { buildChatPromptMessages } from "./chat-engine";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
 import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
@@ -607,16 +608,28 @@ export async function armPeriodCareBailouts(): Promise<void> {
 
 let refreshingScheduled = false;
 
-/** 刷新所有"已知触发时刻"的兜底快照（切后台/启动时调用，保证上下文最新）。 */
+/** 刷新所有"已知触发时刻"的兜底快照（排期变更/切后台/启动时调用，保证上下文最新）。 */
 export async function refreshScheduledBailouts(): Promise<void> {
-    if (refreshingScheduled || !bailoutEnabled()) return;
+    if (refreshingScheduled || !bailoutEnabled()) {
+        if (!bailoutEnabled()) console.warn("[PushBailout] 跳过刷新：当前环境不支持服务端离线预约");
+        return;
+    }
     refreshingScheduled = true;
     try {
         for (const schedule of loadTimedWakeSchedules()) {
-            await armTimedWakeBailout(schedule);
+            // 失败原因过去被直接丢弃，导致「push_jobs 一条记录都没有」完全无法定位：
+            // 是没走到、被安静时段拦了、找不到会话、还是 POST 被拒，全都看不见。
+            // 这里逐条打出来（安卓可用 chrome://inspect 远程查看）。
+            const result = await armTimedWakeBailout(schedule);
+            console.warn(result.ok
+                ? `[PushBailout] 定时唤醒已挂上：${schedule.id}`
+                : `[PushBailout] 定时唤醒未挂上：${schedule.id} — ${result.reason}`);
         }
         for (const rule of loadIdleReconnectRules()) {
-            await armIdleReconnectBailout(rule);
+            const result = await armIdleReconnectBailout(rule);
+            console.warn(result.ok
+                ? `[PushBailout] 冷场重连已挂上：${rule.id}`
+                : `[PushBailout] 冷场重连未挂上：${rule.id} — ${result.reason}`);
         }
         await armPeriodCareBailouts();
     } finally {
@@ -624,13 +637,26 @@ export async function refreshScheduledBailouts(): Promise<void> {
     }
 }
 
-/** 安装刷新钩子：切后台时 + 启动后一次。 */
+/**
+ * 安装刷新钩子。触发时机有四类，缺一不可：
+ *
+ * ① 排期/规则变更（关键修复）——新建「主动联系」后立刻上传。
+ *    旧实现只认「启动 20 秒后」与「切后台」两个时点，而上传本身要重新组装完整
+ *    提示词与 LLM 请求，用户新建后若很快退出/被杀，POST 根本来不及发生，
+ *    服务端连这个任务的存在都不知道。改为变更即上传后，先落库、后任杀。
+ * ② 切后台——被杀前的最后一搏，保留作为兜底。
+ * ③ 启动后尽快（3 秒）补挂一次，覆盖上次没走完的漏网。
+ * ④ 前台定期巡检，兜住「创建时恰好在组装中被打断」的情况。
+ */
 export function installScheduledBailoutRefresher(): void {
     if (typeof window === "undefined") return;
     document.addEventListener("visibilitychange", () => {
         if (document.hidden) void refreshScheduledBailouts();
     });
-    window.setTimeout(() => { void refreshScheduledBailouts(); }, 20_000);
+    window.addEventListener(BAILOUT_DIRTY_EVENT, () => { void refreshScheduledBailouts(); });
+    window.setTimeout(() => { void refreshScheduledBailouts(); }, 3_000);
+    // arm* 内部按 triggerKey 幂等覆盖，重复巡检只是覆盖同一行，代价极低。
+    bgSetInterval(() => { void refreshScheduledBailouts(); }, 10 * 60_000);
 }
 
 /** 撤销追问兜底预约：带 count 只撤该轮的精确键，不带则撤该会话全部。 */

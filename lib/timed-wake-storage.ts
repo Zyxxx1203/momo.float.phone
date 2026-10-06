@@ -1,3 +1,4 @@
+import { markBailoutDirty } from "./bailout-dirty";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 
 export const TIMED_WAKE_SCHEDULES_KEY = "ai_phone_timed_wake_schedules_v1";
@@ -35,6 +36,9 @@ export function loadTimedWakeSchedules(): TimedWakeSchedule[] {
 function saveTimedWakeSchedules(schedules: TimedWakeSchedule[]): void {
     if (typeof window === "undefined") return;
     kvSet(TIMED_WAKE_SCHEDULES_KEY, JSON.stringify(schedules));
+    // 排期一变就请监听方立刻把任务挂到服务端——不能等到「启动 20 秒后」或
+    // 「切后台」那两个时点才组装上传，否则新建后很快退出/被杀会整单丢失。
+    markBailoutDirty();
 }
 
 export function saveTimedWakeSchedule(schedule: TimedWakeSchedule): void {

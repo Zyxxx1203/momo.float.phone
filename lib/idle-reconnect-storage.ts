@@ -2,6 +2,7 @@
 // 计时锚定"用户最后一条消息"；角色的重连消息不重置计时，用连发计数控制；
 // 用户回复后计数清零，周期重新开始。每个角色一条规则。
 
+import { markBailoutDirty } from "./bailout-dirty";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 
 export const IDLE_RECONNECT_RULES_KEY = "ai_phone_idle_reconnect_rules_v1";
@@ -53,6 +54,9 @@ export function loadIdleReconnectRules(): IdleReconnectRule[] {
 function saveRules(rules: IdleReconnectRule[]): void {
     if (typeof window === "undefined") return;
     kvSet(IDLE_RECONNECT_RULES_KEY, JSON.stringify(rules.slice(0, 100)));
+    // 规则变更（新建/改动/连发计数）立即触发重挂，理由同上：
+    // 冷场重连的预约同样不能依赖「切后台」这个不确定的时点。
+    markBailoutDirty();
 }
 
 /** 每角色一条：同角色再建即替换。 */

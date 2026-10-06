@@ -124,21 +124,30 @@ export async function DELETE(request: Request) {
     const triggerPrefix = cleanAccountText(body.triggerPrefix, 200);
     // 前缀清理时可保留一个刚挂上的新键（先挂后清，防止清理和重挂之间被杀导致预约丢失）
     const excludeKey = cleanAccountText(body.excludeKey, 200);
-    if (!triggerKey && !triggerPrefix) {
+    // all=true：清空本账号名下全部离线预约。存量任务散落在多种前缀下
+    //（followup: / reply: / idle: / timedwake: / periodcare: / shortcut:），
+    // 逐条列举既容易漏、又会随功能增加而过时，所以留一个明确的“全清”开关。
+    const purgeAll = body.all === true;
+    if (!purgeAll && !triggerKey && !triggerPrefix) {
       return NextResponse.json({ ok: false, error: "缺少 triggerKey 或 triggerPrefix。" }, { status: 400 });
     }
-    const keyFilter = triggerKey
-      ? `trigger_key=eq.${encodeSupabaseFilter(triggerKey)}`
-      : `trigger_key=like.${encodeSupabaseFilter(`${triggerPrefix}%`)}`
-        + (excludeKey ? `&trigger_key=neq.${encodeSupabaseFilter(excludeKey)}` : "");
+    const keyFilter = purgeAll
+      ? ""
+      : (triggerKey
+        ? `trigger_key=eq.${encodeSupabaseFilter(triggerKey)}`
+        : `trigger_key=like.${encodeSupabaseFilter(`${triggerPrefix}%`)}`
+          + (excludeKey ? `&trigger_key=neq.${encodeSupabaseFilter(excludeKey)}` : ""));
     const userFilter = `user_id=eq.${encodeSupabaseFilter(account.id)}`;
+    // 全清时没有键过滤条件：拼成 `&` 再填空串会得到「&&」，PostgREST 虽能容忍，
+    // 但没必要把这种可疑写法留在请求里。
+    const keyFilterPart = keyFilter ? `&${keyFilter}` : "";
 
     // 已领取（running）的任务不能靠删除停手：那些已经跑进 push-generate 的执行体
     // 持有自己的一份快照，把它从表里删掉并不会中断它，它跑完还会照常续排下一发。
     // 用户看到的就是「规则删掉了，消息还在发，而且没完没了」。
     // 改为把它标记成 cancelled——执行体在生成前与续排前各查一次，被撤就停手。
     const cancelRunning = await supabaseRestFetch(
-      `push_jobs?${userFilter}&${keyFilter}&status=eq.running`,
+      `push_jobs?${userFilter}${keyFilterPart}&status=eq.running`,
       { method: "PATCH", body: JSON.stringify({ status: "cancelled", updated_at: new Date().toISOString() }) },
     );
     if (!cancelRunning.ok) {
@@ -146,7 +155,7 @@ export async function DELETE(request: Request) {
     }
 
     const result = await supabaseRestFetch(
-      `push_jobs?${userFilter}&${keyFilter}&status=eq.pending`,
+      `push_jobs?${userFilter}${keyFilterPart}&status=eq.pending`,
       { method: "DELETE" },
     );
     if (!result.ok) {

@@ -1114,7 +1114,9 @@ export async function parseAndSaveResponse(
                 dispatchChatMessageNotice({
                     sessionId,
                     senderName: charName,
-                    body: partBody(part).slice(0, 80),
+                    // 截断放宽到 200，与离线推送同口径：壳里这条正文会直接变成
+                    // 系统通知内容，过去 80 字会把稍长的消息截掉半句。
+                    body: partBody(part).slice(0, 200),
                     avatar,
                     ...(isGroup ? { isGroup: true } : {}),
                 });

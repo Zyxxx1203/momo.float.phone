@@ -3,10 +3,15 @@ package app.floatphone.shell
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -16,6 +21,9 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Base64
 import android.view.WindowManager
+import androidx.core.app.NotificationCompat
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -46,11 +54,17 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.2"
+        const val VERSION = "1.0.3"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
         const val DEEP_LINK_SCHEME = "floatshell"
+        /**
+         * 网页消息通知用的渠道 id，与 PushService 的「角色消息」渠道刻意同名：
+         * 离线推送和网页内提醒最终落到通知栏的同一个分组，用户在系统设置里
+         * 只需要管一个开关。渠道一旦创建过，后建的只更新名称/描述，不会重置用户选择。
+         */
+        const val CH_MESSAGES = "shell_messages"
     }
 
     private lateinit var rootContainer: FrameLayout
@@ -63,6 +77,15 @@ class MainActivity : AppCompatActivity() {
 
     /** 当前键盘（IME）高度（物理像素），0 = 键盘收起；用于给 WebView 让出底部空间。 */
     private var imeInsetPx: Int = 0
+
+    /** 网页消息通知的自增 id：同一条消息覆盖同一 id 会让新通知顶掉旧的，故逐条递增。 */
+    private var webNotifId = 500
+
+    /** 拉取远程头像用；超时压短，头像拿不到就退回默认图标，不能拖住通知。 */
+    private val avatarClient = OkHttpClient.Builder()
+        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
 
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -376,6 +399,13 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) hideSystemStatusBar()
     }
 
+    /** 点通知回到 App 首页（不指定具体会话，冷启动打进主界面即可）。 */
+    private fun contentIntent(): PendingIntent = PendingIntent.getActivity(
+        this, 0,
+        Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_IMMUTABLE,
+    )
+
     private fun ensurePushService() {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -401,6 +431,39 @@ class MainActivity : AppCompatActivity() {
         /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
         @JavascriptInterface
         fun getStatusBarHeightPx(): Int = statusBarHeightCssPx
+
+        /**
+         * 让网页直接发一条真正的系统通知（网页侧封装在 lib/shell-notify.ts）。
+         *
+         * 为什么必须由壳来做：Android WebView 里 Notification API 与 PushManager 都
+         * 不存在，网页再怎么请求权限也弹不出通知，过去壳内只有覆盖在手机界面上的
+         * 站内横幅。这里用 NotificationManager 发到「角色消息」渠道，与离线推送同一个
+         * 渠道，锁屏/通知栏/后台都能看到。
+         *
+         * @param avatarUrl 角色头像：data:image/... 内联，或 http(s) 直链；空则用应用图标。
+         * @return 是否已发出（JS 端据此决定要不要退回浏览器通知路径）。
+         */
+        @JavascriptInterface
+        fun notify(title: String, body: String, avatarUrl: String): Boolean = runCatching {
+            ensureMessageChannel()
+            val manager = getSystemService(NotificationManager::class.java)
+            val icon = loadAvatarBitmap(avatarUrl)
+            val builder = NotificationCompat.Builder(this@MainActivity, CH_MESSAGES)
+                .setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle(title.ifBlank { "小手机" })
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setAutoCancel(true)
+                .setContentIntent(contentIntent())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+            if (icon != null) builder.setLargeIcon(icon)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                builder.setColor(0xFF5B7CFA.toInt())
+            }
+            manager.notify(webNotifId++, builder.build())
+            if (webNotifId > 900) webNotifId = 500
+            true
+        }.getOrDefault(false)
 
         /**
          * 按直链交给系统下载管理器下载（真·后台）。
@@ -515,6 +578,62 @@ class MainActivity : AppCompatActivity() {
             true
         }.getOrDefault(false)
     }
+
+    /**
+     * 兜底创建「角色消息」渠道。
+     *
+     * PushService 也会建同名渠道，但两者时机不定：网页可能在推送服务起来前就
+     * 发第一条消息通知，那时渠道还不存在——Android 8+ 上往未创建的渠道发通知
+     * 会被静默丢弃（通知栏什么都不出现，且没有任何报错）。这里补一次幂等创建。
+     * 渠道已存在时 createNotificationChannel 只更新名称与描述，不会重置用户的
+     * 重要性/声音选择。
+     */
+    private fun ensureMessageChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        runCatching {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(CH_MESSAGES, "角色消息", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "角色发来的消息"
+                },
+            )
+        }
+    }
+
+    /**
+     * 把网页传来的头像变成通知大图标。支持 data:image/... 内联与 http(s) 直链。
+     * 解析失败或超时一律返回 null，调用方退回应用图标——头像只是锦上添花，
+     * 绝不能因为一张图让通知迟到或丢失。
+     */
+    private fun loadAvatarBitmap(avatarUrl: String): Bitmap? {
+        val value = avatarUrl.trim()
+        if (value.isEmpty()) return null
+        return runCatching {
+            if (value.startsWith("data:image/")) decodeDataUrlBitmap(value) else fetchRemoteAvatar(value)
+        }.getOrNull()
+    }
+
+    /** 解 data:image/png;base64,xxxx 形式的头像。 */
+    private fun decodeDataUrlBitmap(dataUrl: String): Bitmap? = runCatching {
+        val comma = dataUrl.indexOf(',')
+        if (comma < 0) return@runCatching null
+        val header = dataUrl.substring(0, comma)
+        if (!header.contains("base64", ignoreCase = true)) return@runCatching null
+        val bytes = Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }.getOrNull()
+
+    /** 拉取远程头像。站点可能要求登录 Cookie，这里带上；失败返回 null。 */
+    private fun fetchRemoteAvatar(url: String): Bitmap? = runCatching {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return@runCatching null
+        val builder = Request.Builder().url(url)
+        val cookie = CookieManager.getInstance().getCookie(url)
+        if (!cookie.isNullOrEmpty()) builder.header("Cookie", cookie)
+        avatarClient.newCall(builder.build()).execute().use { response ->
+            if (!response.isSuccessful) return@runCatching null
+            val bytes = response.body?.bytes() ?: return@runCatching null
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }
+    }.getOrNull()
 
     /** 按扩展名猜 MIME，MediaStore 用；猜不中给通用二进制。 */
     private fun guessMimeType(fileName: String): String = when (fileName.substringAfterLast('.', "").lowercase()) {

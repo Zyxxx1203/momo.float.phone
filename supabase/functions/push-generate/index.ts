@@ -1207,18 +1207,40 @@ Deno.serve(async (req: Request) => {
           : undefined,
       };
       const nextPayload = { ...payload, merge: nextMerge };
+      const nextTriggerKey = `${job.trigger_key}+`;
       await rest("push_jobs", {
         method: "POST",
         body: JSON.stringify([{
           id: `job_${crypto.randomUUID()}`,
           user_id: job.user_id,
-          trigger_key: `${job.trigger_key}+`,
+          trigger_key: nextTriggerKey,
           kind: "timed_task",
           execute_at: new Date(nextFire + 15_000).toISOString(),
           status: "pending",
           payload: await encryptPayload(JSON.stringify(nextPayload), payloadKey),
         }]),
       }).catch(() => undefined);
+      // 同规则去重（服务端兜底）：冷场重连的下一发既可能由这里续排，也可能由
+      // 客户端重挂（切后台/回前台都会重新挂单）。两边并行时旧链不会消失——
+      // 曾出现同一条「长时间没消息」规则 2 分半内跑出 6 单（:0 / :0+ / :0++ /
+      // :1 / :1+ / :2），用户被连弹好几条通知。客户端虽有延迟清理，但依赖
+      // 页面还活着，App 被杀或长时间后台时根本不执行。
+      // 这里以规则为界清掉其它还挂着的 pending，只留刚挂上的这一单。
+      // 仅在本链还会继续（nextMerge.idleRepeat 仍在）时清理：若是最后一发，
+      // 服务端链到此结束，此时再删客户端的单会让这条规则彻底没有后续。
+      // trigger_key 形如 idle:<ruleId>:<n>，ruleId 内不含冒号，取最后一个冒号及之前即前缀。
+      if (nextMerge.idleRepeat && job.trigger_key.startsWith("idle:")) {
+        const rulePrefix = job.trigger_key.slice(0, job.trigger_key.lastIndexOf(":") + 1);
+        if (rulePrefix.length > "idle:".length) {
+          await rest(
+            `push_jobs?user_id=eq.${encodeURIComponent(job.user_id)}`
+            + `&trigger_key=like.${encodeURIComponent(`${rulePrefix}%`)}`
+            + `&trigger_key=neq.${encodeURIComponent(nextTriggerKey)}`
+            + "&status=eq.pending",
+            { method: "DELETE" },
+          ).catch(() => undefined);
+        }
+      }
     }
 
     await finish("done", `generated, pushed ${pushed}${shortcutActionNote ? `, ${shortcutActionNote}` : ""}${pushErrors.length ? `, errors: ${pushErrors.slice(0, 3).join(" | ")}` : ""}`);

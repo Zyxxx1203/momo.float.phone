@@ -3,7 +3,7 @@
 // App 被杀则由服务端 cron 到点接管生成并推送。组装用的就是前台同一条
 // buildChatPromptMessages → buildProviderRequest 链路，零新逻辑。
 
-import { bgSetInterval } from "./bg-timer";
+import { bgSetInterval, bgSetTimeout } from "./bg-timer";
 import { BAILOUT_DIRTY_EVENT } from "./bailout-dirty";
 import { BAILOUT_CANCEL_EVENT, type BailoutCancelDetail } from "./bailout-cancel";
 import { buildChatPromptMessages } from "./chat-engine";
@@ -478,7 +478,10 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         // 服务端是"生成完才插入下一轮续排任务"——上面的清理可能赶在插入前跑完，
         // 旧链尾巴漏网就会和新链并存多发一轮。延迟再扫一次兜住这个竞态；
         // 新链首发至少在 30 秒后才会生成续排任务，10 秒时点不会误伤。
-        window.setTimeout(() => void cancelBailoutPrefix(`idle:${rule.id}:`, triggerKey), 10_000);
+        // 必须用后台安全的计时器：window.setTimeout 在 WebView 进后台后被冻结，
+        // 这个补扫永远不执行，于是服务端续排的旧链尾巴漏网，和新链并存多发一轮
+        //（实测同规则 2 分半内跑出 6 单）。Worker 计时器不受后台冻结影响。
+        bgSetTimeout(() => void cancelBailoutPrefix(`idle:${rule.id}:`, triggerKey), 10_000);
         return { ok: true };
     } catch (err) {
         console.warn("[PushBailout] idle reconnect arm failed:", err);

@@ -127,12 +127,28 @@ export async function DELETE(request: Request) {
     if (!triggerKey && !triggerPrefix) {
       return NextResponse.json({ ok: false, error: "缺少 triggerKey 或 triggerPrefix。" }, { status: 400 });
     }
-    const userFilter = `user_id=eq.${encodeSupabaseFilter(account.id)}&status=eq.pending`;
     const keyFilter = triggerKey
       ? `trigger_key=eq.${encodeSupabaseFilter(triggerKey)}`
       : `trigger_key=like.${encodeSupabaseFilter(`${triggerPrefix}%`)}`
         + (excludeKey ? `&trigger_key=neq.${encodeSupabaseFilter(excludeKey)}` : "");
-    const result = await supabaseRestFetch(`push_jobs?${userFilter}&${keyFilter}`, { method: "DELETE" });
+    const userFilter = `user_id=eq.${encodeSupabaseFilter(account.id)}`;
+
+    // 已领取（running）的任务不能靠删除停手：那些已经跑进 push-generate 的执行体
+    // 持有自己的一份快照，把它从表里删掉并不会中断它，它跑完还会照常续排下一发。
+    // 用户看到的就是「规则删掉了，消息还在发，而且没完没了」。
+    // 改为把它标记成 cancelled——执行体在生成前与续排前各查一次，被撤就停手。
+    const cancelRunning = await supabaseRestFetch(
+      `push_jobs?${userFilter}&${keyFilter}&status=eq.running`,
+      { method: "PATCH", body: JSON.stringify({ status: "cancelled", updated_at: new Date().toISOString() }) },
+    );
+    if (!cancelRunning.ok) {
+      return NextResponse.json({ ok: false, error: cancelRunning.error }, { status: 500 });
+    }
+
+    const result = await supabaseRestFetch(
+      `push_jobs?${userFilter}&${keyFilter}&status=eq.pending`,
+      { method: "DELETE" },
+    );
     if (!result.ok) {
       return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
     }

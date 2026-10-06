@@ -492,6 +492,24 @@ Deno.serve(async (req: Request) => {
     body: JSON.stringify({ status, result_note: note.slice(0, 300), updated_at: new Date().toISOString() }),
   }).catch(() => undefined);
 
+  /**
+   * 这一单是否已被客户端撤销。
+   *
+   * 用户关掉/删掉主动消息时，站点接口会把该规则相关的任务改成 cancelled（pending
+   * 的直接删除）。但本函数往往已经把它领取成 running 并在跑 LLM——那时它自己这份
+   * 快照不受影响。不查一次的话，规则删了它照样生成、照样弹通知，还会继续续排下一发，
+   * 用户看到的就是「根本没关上」。
+   * 查不到（网络抖动等）按「未被撤销」处理，宁可多发一次也不误杀正常消息。
+   */
+  const isCancelled = async (): Promise<boolean> => {
+    const response = await rest(
+      `push_jobs?id=eq.${encodeURIComponent(job.id)}&select=status&limit=1`,
+    ).catch(() => null);
+    if (!response || !response.ok) return false;
+    const rows = await response.json().catch(() => []) as { status?: string }[];
+    return rows[0]?.status === "cancelled";
+  };
+
   // 分段进度：卡死时 result_note 会停在最后完成的一步，精确定位死点
   const startedAt = Date.now();
   const progress = (note: string) => rest(`push_jobs?id=eq.${encodeURIComponent(job.id)}`, {
@@ -598,6 +616,13 @@ Deno.serve(async (req: Request) => {
     const todayRows = capResponse.ok ? await capResponse.json() as unknown[] : [];
     if (todayRows.length >= DAILY_GENERATION_CAP) {
       await finish("done", `daily cap (${DAILY_GENERATION_CAP}) reached`);
+      return;
+    }
+
+    // 动模型之前先确认这一单还没被用户撤销——生成一次要烧 token，
+    // 撤了就不该再花这个成本，也不该再弹一条用户已经不要的通知。
+    if (await isCancelled()) {
+      await finish("done", "cancelled before generate");
       return;
     }
 
@@ -1180,6 +1205,11 @@ Deno.serve(async (req: Request) => {
     await writeShortcutDeliveryDiagnostic();
 
     // 冷场重连的下一发：连发上限内自动排队（用户回来后客户端会撤销并按新周期重挂）
+    // 用户已撤销这条链时绝不再续排——否则规则删了，新单还会源源不断地冒出来。
+    if (await isCancelled()) {
+      await finish("done", `generated, pushed ${pushed}, cancelled before repeat`);
+      return;
+    }
     const idleRepeat = payload.merge?.idleRepeat as
       | { intervalMs?: number; remaining?: number; quietWin?: { startMin: number; endMin: number; tzOffsetMin: number } | null }
       | undefined;

@@ -134,6 +134,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { requestBackgroundChatReply, scheduleFollowUp } from "@/lib/follow-up-service";
 import { CHAT_MESSAGE_NOTICE_EVENT, CHAT_OPEN_SESSION_EVENT, type ChatMessageNoticeDetail } from "@/lib/chat-notification-events";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { CallLayer } from "@/components/chat/call-layer";
 import { installChatSoundListener, playChatSoundOnce, setMiniChatSoundSessionId, startChatSoundLoop } from "@/lib/chat-sound";
 import { setMascotContext } from "@/lib/mascot-context";
 import { DESKTOP_WIDGETS_CHANGED_EVENT } from "@/lib/mascot-events";
@@ -4957,6 +4958,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               <MascotFloat />
               {/* 预览弹窗宿主：独立于桌宠的展开/收起状态，否则桌宠收成小球时弹不出来 */}
               <MascotPreviewHost />
+
+              {/* 全局通话层：通话提升到桌面级常驻渲染，切会话/回桌面/开别的 App 都不中断。
+                  没有通话时它渲染 null，不影响桌面。 */}
+              <CallLayer />
 
               {/* Widget Picker Bottom Sheet */}
               {showWidgetPicker && (

@@ -134,6 +134,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { requestBackgroundChatReply, scheduleFollowUp } from "@/lib/follow-up-service";
 import { CHAT_MESSAGE_NOTICE_EVENT, CHAT_OPEN_SESSION_EVENT, type ChatMessageNoticeDetail } from "@/lib/chat-notification-events";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { CallLayer } from "@/components/chat/call-layer";
 import { installChatSoundListener, playChatSoundOnce, setMiniChatSoundSessionId, startChatSoundLoop } from "@/lib/chat-sound";
 import { setMascotContext } from "@/lib/mascot-context";
 import { DESKTOP_WIDGETS_CHANGED_EVENT } from "@/lib/mascot-events";
@@ -2581,6 +2582,20 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     };
   }, [desktopReady, openChatSessionFromNotice]);
 
+  // 通话挂断后让角色回应一次。
+  // 通话屏已提升到全局层，挂断时聊天页可能根本没挂载（用户在桌面/别的 App 里），
+  // 所以收尾放在常驻的桌面壳里；requestBackgroundChatReply 自身会处理
+  //「聊天页正开着时由聊天页生成」的情况，不会重复两套内容。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const sessionId = (e as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      if (!sessionId) return;
+      window.setTimeout(() => { void requestBackgroundChatReply(sessionId); }, 0);
+    };
+    window.addEventListener("chat-call-ended", handler);
+    return () => window.removeEventListener("chat-call-ended", handler);
+  }, []);
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{
@@ -4957,6 +4972,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               <MascotFloat />
               {/* 预览弹窗宿主：独立于桌宠的展开/收起状态，否则桌宠收成小球时弹不出来 */}
               <MascotPreviewHost />
+
+              {/* 全局通话层：常驻桌面壳，切会话 / 回桌面 / 开别的 App 都不中断通话 */}
+              <CallLayer />
 
               {/* Widget Picker Bottom Sheet */}
               {showWidgetPicker && (

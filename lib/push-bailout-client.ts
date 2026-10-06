@@ -365,10 +365,23 @@ async function postBailoutJob(input: {
     return Boolean(response && response.ok);
 }
 
+/**
+ * 撤销前的门控短路是否该放行。
+ *
+ * peekAccountPushSubscribed() 读的是本地缓存，可能停在很久以前的 false 上。
+ * 壳环境里这个缓存没有意义（hasAccountPushSubscription 恒为 true，壳订阅由常驻
+ * 长连接天然持有），却会让撤销被静默跳过——服务端那条预约占依然照常执行，
+ * 和本地这次生成叠成两套内容（通知里一套、聊天里另一套）。壳里一律放行。
+ */
+function maySkipBailoutCancel(): boolean {
+    if (isShellEnvironment()) return false;
+    return peekAccountPushSubscribed() === false;
+}
+
 /** 撤销任意兜底预约（精确键）。 */
 export function cancelBailoutKey(triggerKey: string): void {
     if (!bailoutEnabled()) return;
-    if (peekAccountPushSubscribed() === false) return;
+    if (maySkipBailoutCancel()) return;
     void pushJobsFetch({
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
@@ -380,7 +393,7 @@ export function cancelBailoutKey(triggerKey: string): void {
  *  返回 Promise 以便调用方在重挂前先等撤销落地。 */
 export async function cancelBailoutPrefix(triggerPrefix: string, excludeKey?: string): Promise<void> {
     if (!bailoutEnabled()) return;
-    if (peekAccountPushSubscribed() === false) return;
+    if (maySkipBailoutCancel()) return;
     await pushJobsFetch({
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
@@ -675,7 +688,7 @@ export function installScheduledBailoutRefresher(): void {
 /** 撤销追问兜底预约：带 count 只撤该轮的精确键，不带则撤该会话全部。 */
 export function cancelFollowUpBailout(sessionId: string, count?: number): void {
     if (!bailoutEnabled()) return;
-    if (peekAccountPushSubscribed() === false) return; // 账号没订阅→从没挂过单，别浪费请求
+    if (maySkipBailoutCancel()) return; // 账号没订阅→从没挂过单，别浪费请求
     void pushJobsFetch({
         method: "DELETE",
         headers: { "Content-Type": "application/json" },

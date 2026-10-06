@@ -107,10 +107,14 @@ export async function hasAccountPushSubscription(): Promise<boolean> {
 /**
  * 是否运行在安卓壳（FloatShell App）的 WebView 里。壳自带长连接推送通道，不走 Web Push。
  *
- * 实现移到 lib/shell-detect.ts 并在此转出：本文件依赖 personal-push-cloud，
- * 而后者也需要这个判断，直接从本文件导入会形成循环依赖。
+ * 实现放在 lib/shell-detect.ts，这里既要转出给其它模块，也要在本文件内部使用。
+ * 注意：只写 `export { x } from "..."` 是「重导出」，它不会在本模块作用域创建
+ * 绑定——本文件内继续调用 isShellEnvironment() 会抛 ReferenceError
+ * （曾表现为创建主动消息时报「isShellEnvironment is not defined」）。
+ * 必须先 import 再用 export 转出。
  */
-export { isShellEnvironment } from "./shell-detect";
+import { isShellEnvironment } from "./shell-detect";
+export { isShellEnvironment };
 
 function isPushSupported(): boolean {
     return typeof window !== "undefined"

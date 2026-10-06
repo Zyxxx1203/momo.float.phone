@@ -36,9 +36,9 @@ import { CustomAppRunner } from "@/components/app-market/custom-app-runner";
 import { CustomAppForegroundBoundary } from "@/components/app-market/custom-app-failure";
 
 import { ChatSettingsPanel } from "./chat-settings-panel";
-import { VoiceCallScreen } from "./voice-call-screen";
-import { VideoCallScreen } from "./video-call-screen";
-import { GroupCallScreen } from "./group-call-screen";
+// 通话界面不再由聊天室渲染：已提升到 desktop-shell 的 CallLayer，
+// 这样切会话、回桌面都不会中断通话。聊天室只负责「发起」；挂断由通话界面自己回调。
+import { startCall } from "@/lib/call-session-store";
 import { TransferTargetModal } from "./transfer-target-modal";
 import { GiftPickerModal } from "./gift-picker-modal";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -1138,11 +1138,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     const [customPlusActions, setCustomPlusActions] = useState<RegisteredCustomAppChatPlusAction[]>(() => loadCustomAppChatPlusActions());
     const [activeCustomChatPlus, setActiveCustomChatPlus] = useState<ActiveCustomChatPlus | null>(null);
     const [showSettings, setShowSettings] = useState(false);
-    const [showVoiceCall, setShowVoiceCall] = useState(false);
-    const [showVideoCall, setShowVideoCall] = useState(false);
-    const [callMinimized, setCallMinimized] = useState(false);
-    const [callInitiator, setCallInitiator] = useState<"user" | "character">("user");
-    const [callInitiatorName, setCallInitiatorName] = useState<string>("");
+    // 通话状态已提升到全局 store（lib/call-session-store）：聊天室只负责
+    // 「发起」（startCall）与「挂断」（endCall），通话界面由 desktop-shell 的
+    // <CallLayer /> 常驻渲染，切会话 / 回桌面都不再中断通话。
     const [userIdentity, setUserIdentity] = useState<UserIdentity | null>(null);
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(() => loadChatAppSettings().enterToSendEnabled === true);
     const [chatAppSettingsRevision, setChatAppSettingsRevision] = useState(0);
@@ -2133,23 +2131,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         return () => { setDebugChatState(null); };
     }, [session, messages]);
 
-    // Listen for AI-initiated call triggers from follow-up service
-    useEffect(() => {
-        const handler = (e: Event) => {
-            const detail = (e as CustomEvent).detail;
-            if (detail?.sessionId === session.id) {
-                // Only handle call if this ChatRoom is currently visible
-                if (!isChatRoomElementVisible(wrapperRef.current)) return;
-                setCallInitiator("character");
-                if (detail.type === "voice") setShowVoiceCall(true);
-                else if (detail.type === "video") setShowVideoCall(true);
-                // Dismiss the global incoming-call bar (if showing)
-                window.dispatchEvent(new CustomEvent("incoming-call-dismiss"));
-            }
-        };
-        window.addEventListener("ai-call-trigger", handler);
-        return () => window.removeEventListener("ai-call-trigger", handler);
-    }, [session.id]);
+    // AI 主动来电事件（ai-call-trigger）改由常驻的 CallLayer 监听：
+    // 放在聊天室里时，用户不在聊天页就会把来电丢弃（原实现还额外要求聊天室可见）。
 
     // Helper: handle AI accepting/declining user's red packet or transfer
     const buildAssistantActionEditMeta = (rawResponseText: string) => ({
@@ -2483,10 +2466,14 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                             detail: { sessionId: session.id, type: callType, characterName: r.characterName },
                         }));
                     } else {
-                        setCallInitiator("character");
-                        setCallInitiatorName(r.characterName);
-                        if (callType === "voice") setShowVoiceCall(true);
-                        else setShowVideoCall(true);
+                        // 交给全局通话层渲染：群成员发起时同样先显示来电待接听
+                        startCall({
+                            sessionId: session.id,
+                            characterId: r.characterId,
+                            kind: callType,
+                            initiator: "character",
+                            initiatorName: r.characterName,
+                        });
                     }
                     continue;
                 }
@@ -3097,9 +3084,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     // Helper: handle AI-triggered call from splitAndSaveAIMessages result
     const handleCallTrigger = (triggerCall?: "voice" | "video") => {
         if (!triggerCall) return;
-        setCallInitiator("character");
-        if (triggerCall === "voice") setShowVoiceCall(true);
-        else setShowVideoCall(true);
+        // 交给全局通话层渲染：initiator=character 时它会先显示来电待接听。
+        startCall({ sessionId: session.id, characterId: session.contactId, kind: triggerCall, initiator: "character" });
     };
 
     const persistHiddenToolResult = (content?: string, toolExecutionId?: string) => {
@@ -5524,47 +5510,27 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setMessages(nextMessages);
     }, [session.id, stopLoadMoreAnchorTracking]);
 
-    // Shared handler: reload messages + re-trigger scroll-to-bottom after call ends
-    const returnFromCall = (hide: () => void) => {
-        hide();
-        setCallMinimized(false);
-        needsInitialScrollRef.current = true;
-        prevMsgCountRef.current = 0;
-        syncMessagesFromStorage();
-        triggerReply();
-    };
+    // 通话挂断的收尾：界面已提升到 desktop-shell 的 <CallLayer />，本组件不会被卸载，
+    // 但也收不到挂断回调了——改听全局的 chat-call-ended 事件，把通话留痕刷新出来，
+    // 并让角色对刚结束的这通电话回应一次（等价于旧 returnFromCall 里做的事）。
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
+            if (!detail || detail.sessionId !== session.id) return;
+            needsInitialScrollRef.current = true;
+            prevMsgCountRef.current = 0;
+            syncMessagesFromStorage();
+            void triggerReply();
+        };
+        window.addEventListener("chat-call-ended", handler);
+        return () => window.removeEventListener("chat-call-ended", handler);
+    }, [session.id, syncMessagesFromStorage, triggerReply]);
 
     const editingMessage = editingMessageId ? messages.find(m => m.id === editingMessageId) : null;
     const editingSystemInstruction = editingMessage ? isSystemInstructionMessage(editingMessage) : false;
 
-    // 群聊通话没有缩小悬浮窗，维持原有的整屏早退渲染
-    if (showVoiceCall && session.isGroup && groupCharacters.length > 0) {
-        return (
-            <GroupCallScreen
-                type="voice"
-                session={session}
-                characters={groupCharacters}
-                initiator={callInitiator}
-                initiatorName={callInitiatorName}
-                onEnd={() => returnFromCall(() => setShowVoiceCall(false))}
-            />
-        );
-    }
-
-    if (showVideoCall && session.isGroup && groupCharacters.length > 0) {
-        return (
-            <GroupCallScreen
-                type="video"
-                session={session}
-                characters={groupCharacters}
-                initiator={callInitiator}
-                initiatorName={callInitiatorName}
-                onEnd={() => returnFromCall(() => setShowVideoCall(false))}
-            />
-        );
-    }
-    // 单聊语音/视频通话改为在下方主返回内联渲染（而非提前 return），
-    // 这样缩小为悬浮窗时聊天页与通话组件可以同时挂载，通话状态（计时/字幕）不会丢失。
+    // 群聊通话与单聊通话界面统一提升到 desktop-shell 的 <CallLayer />：
+    // 这里不再早退渲染，切会话、退出聊天、回手机桌面都不影响通话继续。
 
     const chatRoomBackgroundStyle = bgImageResolved ? {
         backgroundColor: "#fff",
@@ -6472,8 +6438,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 	                onCloseTheaterMode={closeTheaterMode}
 	                onOpenRichModal={(modal) => { setShowPlusMenu(false); setRichModal(modal); }}
                 onOpenCustomPlusAction={handleOpenCustomPlusAction}
-                onStartVideoCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); setCallInitiator("user"); setShowVideoCall(true); }}
-                onStartVoiceCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); setCallInitiator("user"); setShowVoiceCall(true); }}
+                onStartVideoCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); startCall({ sessionId: session.id, characterId: session.contactId, kind: "video", initiator: "user" }); }}
+                onStartVoiceCall={() => { cancelFollowUp(session.id); setShowPlusMenu(false); startCall({ sessionId: session.id, characterId: session.contactId, kind: "voice", initiator: "user" }); }}
                 onSendText={handleSendText}
                 onStopGeneration={clearStuckGeneration}
                 onTriggerAIResponse={triggerAIResponse}
@@ -6950,35 +6916,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 </div>
             )}
 
-            {/* 单聊语音/视频通话：内联挂载（而非提前 return），使缩小为悬浮窗时通话组件
-                不被卸载，计时/字幕等状态得以保留；组件内部依据 minimized 决定渲染
-                全屏界面还是左侧悬浮窗 */}
-            {/* 通话层挂到聊天室的父容器，脱离 session 自定义 CSS 的作用域。
-                这样用户美化 header/footer、定位和 z-index 时不会遮挡通话顶栏/底栏。 */}
-            {wrapperRef.current?.parentElement && showVoiceCall && character && createPortal(
-                <VoiceCallScreen
-                    session={session}
-                    character={character}
-                    initiator={callInitiator}
-                    minimized={callMinimized}
-                    onMinimize={() => setCallMinimized(true)}
-                    onRestore={() => setCallMinimized(false)}
-                    onEnd={() => returnFromCall(() => setShowVoiceCall(false))}
-                />,
-                wrapperRef.current.parentElement,
-            )}
-            {wrapperRef.current?.parentElement && showVideoCall && character && createPortal(
-                <VideoCallScreen
-                    session={session}
-                    character={character}
-                    initiator={callInitiator}
-                    minimized={callMinimized}
-                    onMinimize={() => setCallMinimized(true)}
-                    onRestore={() => setCallMinimized(false)}
-                    onEnd={() => returnFromCall(() => setShowVideoCall(false))}
-                />,
-                wrapperRef.current.parentElement,
-            )}
+            {/* 通话界面不再在这里挂载：已提升到 desktop-shell 的 <CallLayer />。
+                原先 portal 进聊天室父容器，导致返回会话列表就被隐藏、回桌面直接
+                随聊天 App 卸载——用户看到的就是「退出聊天框通话就结束」。 */}
 
         </div >
     );

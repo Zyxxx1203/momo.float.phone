@@ -452,11 +452,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
             setSubtitles(prev => [...prev, { id: `ai-${Date.now()}`, role: "assistant", text: displayText }]);
 
-            // 缩小为悬浮窗期间收到的回复：只静默记录文字，不播放语音
-            if (minimizedRef.current) {
-                setCallState("IDLE");
-                return;
-            }
+            // 悬浮窗期间收到的回复照常播放语音：真实手机缩成小窗后通话仍在继续，
+            // 旧实现在这里 return 掉，用户看到的就是「一缩小就再也听不到声音」。
 
             setCallState("AI_SPEAKING");
 
@@ -541,8 +538,9 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             sttRef.current = null;
             setInterimText("");
         }
-        if (!androidTextInputOnly && inputMode === "voice" && callState === "IDLE" && !isMuted && !minimized) {
-            const timer = setTimeout(() => { if (stateRef.current === "IDLE" && !minimizedRef.current) startListening(); }, 500);
+        // 悬浮窗不阻断自动监听：识别照常进行（缩小只影响界面大小，不影响通话）
+        if (!androidTextInputOnly && inputMode === "voice" && callState === "IDLE" && !isMuted) {
+            const timer = setTimeout(() => { if (stateRef.current === "IDLE") startListening(); }, 500);
             return () => clearTimeout(timer);
         }
         if (isMuted && sttRef.current) { sttRef.current.abort(); sttRef.current = null; }

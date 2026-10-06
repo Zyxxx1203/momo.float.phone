@@ -141,6 +141,7 @@ import { useWeixinBridge } from "@/lib/use-weixin-bridge";
 import { startWeixinCloudRealtimeSync } from "@/lib/weixin-cloud-sync";
 import { WeixinSyncToast } from "@/components/weixin-sync-toast";
 import { sendBrowserNotification } from "@/lib/browser-notification";
+import { canSendShellNotification, sendShellNotification } from "@/lib/shell-notify";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { completePendingMcpOAuthCallback } from "@/lib/tool-executor";
 import { LayoutGrid, LoaderCircle, RefreshCw } from "lucide-react";
@@ -2653,6 +2654,14 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       const title = detailSenderName && detailSenderName !== "对方"
         ? detailSenderName
         : (isGroup ? session.groupName || "群聊" : session.alias || char?.name || "新消息");
+
+      // 壳环境：站内横幅整体停用，改发原生系统通知（标题/头像沿用上面的解析结果）。
+      // 放在这里是因为「正在看这个会话就不打扰」的判断刚做完——用户要的正是
+      // 「除当前聊天页外全线弹系统通知」，过滤逻辑与横幅共用同一处。
+      if (canSendShellNotification()) {
+        sendShellNotification(title, detail.body.trim(), detail.avatar ?? char?.avatar ?? null);
+        return;
+      }
 
       if (chatMessageNoticeTimerRef.current !== null) {
         window.clearTimeout(chatMessageNoticeTimerRef.current);

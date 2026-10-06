@@ -25,6 +25,7 @@ import {
 } from "@/lib/weixin-cloud-sync";
 import { connectPersonalPushCloud, deployPersonalPushCloud, isPersonalPushCloudActive } from "@/lib/personal-push-cloud";
 import { ensurePersonalPushSubscription, getOfflinePushState, markAccountPushSubscribed } from "@/lib/push-client";
+import { diagnoseScheduledBailouts } from "@/lib/push-bailout-diagnostics";
 import { getWeixinCloudDeployedAt, markWeixinCloudDeployed, savePushCloudScheduled, saveWeixinCloudScheduled } from "@/lib/cloud-deploy-status";
 import { Input, Select } from "@/components/ui/form";
 
@@ -150,6 +151,10 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
     const [connectOpen, setConnectOpen] = useState(false);
     const [connectUrl, setConnectUrl] = useState("");
     const [connectKey, setConnectKey] = useState("");
+    // 离线预约诊断：把「为什么没挂上服务端任务」逐条摊开。
+    // 这些原因在正常的刷新流程里是被静默丢弃的，只有这里能看到。
+    const [diagnosing, setDiagnosing] = useState(false);
+    const [diagnoseText, setDiagnoseText] = useState<string | null>(null);
 
     useEffect(() => {
         setCloudReady(isCloudBackupConfigured(loadCloudBackupConfig()));
@@ -426,6 +431,21 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         }
     };
 
+    /** 逐项重跑离线预约并把每一步的结论摊开（含失败的具体原因）。 */
+    const runDiagnose = async () => {
+        if (diagnosing) return;
+        setDiagnosing(true);
+        setResultDialog(null);
+        try {
+            const text = await diagnoseScheduledBailouts();
+            setDiagnoseText(text);
+        } catch (err) {
+            setDiagnoseText(`诊断失败：${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+            setDiagnosing(false);
+        }
+    };
+
     const scopeRow = (
         label: string,
         checked: boolean,
@@ -515,6 +535,42 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 {statusCard(<MessageSquare size={17} strokeWidth={1.9} />, "微信接入", weixinDeployed, "云函数与定时任务已部署")}
                 {statusCard(<Satellite size={17} strokeWidth={1.9} />, "离线推送", pushActive, "已部署到你的 Supabase")}
             </div>
+
+            {/* 离线预约诊断：主动消息收不到时的第一手证据 */}
+            <button
+                type="button"
+                className="self-center text-[calc(12px*var(--app-text-scale,1))] font-semibold text-gray-500 underline underline-offset-2 hover:text-gray-700 disabled:opacity-40"
+                onClick={() => void runDiagnose()}
+                disabled={Boolean(busy) || diagnosing}
+            >
+                {diagnosing ? "正在诊断离线预约…" : "主动消息收不到？点这里诊断 →"}
+            </button>
+
+            {/* 诊断结果：等宽、可整体选中复制 */}
+            {diagnoseText !== null && (
+                <div className="modal-overlay" data-ui="modal" onClick={() => setDiagnoseText(null)}>
+                    <div
+                        className="modal-dialog"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="离线预约诊断结果"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="modal-body flex flex-col gap-2">
+                            <h3 className="modal-title">离线预约诊断</h3>
+                            <pre
+                                className="menu-desc !mt-0 max-h-[52vh] overflow-auto whitespace-pre-wrap rounded-[14px] bg-black/[0.03] px-3 py-2.5"
+                                style={{ wordBreak: "break-word" }}
+                            >{diagnoseText}</pre>
+                        </div>
+                        <div className="modal-footer">
+                            <button type="button" className="ui-btn ui-btn-outline" onClick={() => setDiagnoseText(null)}>
+                                关闭
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* 结果弹窗（成功/失败统一） */}
             {resultDialog && (

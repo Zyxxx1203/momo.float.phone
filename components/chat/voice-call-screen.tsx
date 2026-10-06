@@ -46,9 +46,9 @@ type VoiceCallScreenProps = {
     onEnd: () => void;
     onConnect?: () => void;
     initiator?: "user" | "character";
-    /** 通话是否处于缩小的悬浮窗状态：暂停麦克风监听/计时/语音播放，仅显示背景+名字 */
+    /** 通话是否处于缩小的悬浮窗状态：通话继续（识别/播放/计时不停），界面缩为小窗 */
     minimized?: boolean;
-    /** 点击左上角返回键：请求缩小为悬浮窗（通话逻辑冻结，不挂断） */
+    /** 点击左上角返回键：请求缩小为悬浮窗（通话继续，不挂断） */
     onMinimize?: () => void;
     /** 点击悬浮窗：请求恢复为全屏通话界面 */
     onRestore?: () => void;
@@ -106,13 +106,16 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     useEffect(() => { stateRef.current = callState; }, [callState]);
     useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
 
-    // 缩小为悬浮窗：冻结通话——停止监听、打断在播放的语音
+    // 缩小为悬浮窗：通话继续，不再「冻结」。
+    //
+    // 旧实现把缩小当成挂起——中止识别、打断在播放的语音、停掉计时，于是悬浮窗
+    // 只是一个空壳：角色正在说的那句被硬切，之后也再没有声音，用户看到的就是
+    // 「一缩小就没声音」。真实手机上通话缩成小窗后是继续通话的，这里对齐：
+    // 播放不打断，识别与计时照常，悬浮窗就是通话中的小窗。
     useEffect(() => {
         if (!minimized) return;
-        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+        // 只清掉界面上的临时字幕；通话本身（播放 / 识别 / 计时）保持运行。
         setInterimText("");
-        if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
     }, [minimized]);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
@@ -195,13 +198,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             callStartRef.current = Date.now();
         }
 
-        // 缩小为悬浮窗：冻结计时显示，不再推进
-        if (minimized) {
-            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-            if (pausedAtRef.current === null) pausedAtRef.current = Date.now();
-            return;
-        }
-        // 从悬浮窗恢复：把冻结期间流逝的时间补回起点，避免时长跳变
+        // 悬浮窗不再冻结计时：通话在后台继续，时长就该继续走。
+        // pausedAtRef 的补偿保留着——若某次会话在旧版逻辑下进入过冻结态，
+        // 恢复时仍能把那段时长补回起点，不会出现时长跳变。
         if (pausedAtRef.current !== null) {
             callStartRef.current += Date.now() - pausedAtRef.current;
             pausedAtRef.current = null;

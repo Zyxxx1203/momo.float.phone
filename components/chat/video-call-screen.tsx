@@ -46,9 +46,9 @@ type VideoCallScreenProps = {
     onEnd: () => void;
     onConnect?: () => void;
     initiator?: "user" | "character";
-    /** 通话是否处于缩小的悬浮窗状态：暂停麦克风监听/计时/语音播放，仅显示背景+名字 */
+    /** 通话是否处于缩小的悬浮窗状态：通话继续（识别/播放/计时不停），界面缩为小窗 */
     minimized?: boolean;
-    /** 点击左上角返回键：请求缩小为悬浮窗（通话逻辑冻结，不挂断） */
+    /** 点击左上角返回键：请求缩小为悬浮窗（通话继续，不挂断） */
     onMinimize?: () => void;
     /** 点击悬浮窗：请求恢复为全屏通话界面 */
     onRestore?: () => void;
@@ -114,13 +114,15 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     useEffect(() => { stateRef.current = callState; }, [callState]);
     useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
 
-    // 缩小为悬浮窗：冻结通话——停止监听、打断在播放的语音（摄像头继续保留，方便恢复时不用重新申请权限）
+    // 缩小为悬浮窗：通话继续，不再「冻结」。
+    //
+    // 与 voice-call-screen 同一处修正：旧实现把缩小当成挂起——中止识别、打断正在
+    // 播放的语音，于是悬浮窗成了空壳，角色正说的那句被硬切、之后也没声音。
+    // 真机上通话缩成小窗是继续通话的。摄像头照旧保留，恢复时不用重新申请权限。
     useEffect(() => {
         if (!minimized) return;
-        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+        // 只清掉界面上的临时字幕；通话本身（播放 / 识别 / 计时）保持运行。
         setInterimText("");
-        if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
     }, [minimized]);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
@@ -290,11 +292,12 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         if (callState === "CONNECTING" || callState === "ENDED") return;
         if (!callStartRef.current) callStartRef.current = Date.now();
 
-        // 缩小为悬浮窗：冻结计时显示，不再推进
-        if (minimized) {
-            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-            if (pausedAtRef.current === null) pausedAtRef.current = Date.now();
-            return;
+        // 悬浮窗不再冻结计时：通话在后台继续，时长就该继续走。
+        // pausedAtRef 的补偿保留着——若某次会话在旧版逻辑下进入过冻结态，
+        // 恢复时仍能把那段时长补回起点，不会出现时长跳变。
+        if (pausedAtRef.current !== null) {
+            callStartRef.current += Date.now() - pausedAtRef.current;
+            pausedAtRef.current = null;
         }
         // 从悬浮窗恢复：把冻结期间流逝的时间补回起点，避免时长跳变
         if (pausedAtRef.current !== null) {

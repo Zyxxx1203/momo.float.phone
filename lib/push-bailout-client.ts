@@ -48,6 +48,40 @@ const CALL_INVITE_INSTRUCTION = "（可选能力：如果你此刻更想直接�
     + "其中聊天对象按当前用户填写；从第二行开始写你接通后要说的话。"
     + "不适合打电话就正常发消息。无论选哪种，都不要提及本条说明。）";
 
+// ── 离线推送的会话信息：通知点击直达 + 角色头像 ────────────────
+// notify 字段随快照一起上传，服务端广播时原样带给壳（PushService 读
+// sessionId 决定点击跳哪个会话、读 avatar 当大图标）。
+// 头像走 data URL 时可能很大，而快照有 900KB 上限——超限会被服务端 413
+// 拒收、整条离线回复都发不出，所以这里卡一个远低于上限的阈值，超了就
+// 只发通知不发头像（宁可图标退回默认，也不能让消息发不出来）。
+const NOTIFY_AVATAR_MAX_CHARS = 120_000;
+
+/** 按会话取角色头像：群聊没有单一角色，返回 undefined。 */
+function resolveNotifyAvatar(sessionId: string | undefined): string | undefined {
+    if (!sessionId) return undefined;
+    try {
+        const session = loadChatSessions().find(s => s.id === sessionId);
+        if (!session || session.isGroup) return undefined;
+        const avatar = loadCharacters().find(c => c.id === session.contactId)?.avatar;
+        if (typeof avatar !== "string") return undefined;
+        const trimmed = avatar.trim();
+        if (!trimmed || trimmed.length > NOTIFY_AVATAR_MAX_CHARS) return undefined;
+        // 只放行壳侧解得了的形态：内联 data URL 或 http(s) 直链
+        if (trimmed.startsWith("data:image/") || trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            return trimmed;
+        }
+        return undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** 组装 notify 字段：标题 + 站内地址，能取到头像就一并带上。 */
+function notifyField(title: string, sessionId: string | undefined): Record<string, unknown> {
+    const avatar = resolveNotifyAvatar(sessionId);
+    return { title, url: "/", ...(avatar ? { avatar } : {}) };
+}
+
 function readCallInviteArmedMap(): Record<string, number> {
     try {
         const raw = localStorage.getItem(CALL_INVITE_STORE_KEY);
@@ -158,7 +192,7 @@ export async function armReplyBailout(params: {
                     body: params.request.body,
                     providerKind: params.request.providerKind,
                 },
-                notify: { title: params.characterName, url: "/" },
+                notify: notifyField(params.characterName, params.sessionId),
                 merge: {
                     sessionId: params.sessionId,
                     prevCount: 0,
@@ -309,7 +343,7 @@ export async function armFollowUpBailout(
                         body: request.body,
                         providerKind: request.providerKind,
                     },
-                    notify: { title: character.name, url: "/" },
+                    notify: notifyField(character.name, sessionId),
                     ...(shortcutContinuation ? { shortcutContinuation } : {}),
                     merge: {
                         sessionId,
@@ -355,7 +389,7 @@ async function postBailoutJob(input: {
                     body: input.request.body,
                     providerKind: input.request.providerKind,
                 },
-                notify: { title: input.notifyTitle, url: "/" },
+                notify: notifyField(input.notifyTitle, typeof input.merge.sessionId === "string" ? input.merge.sessionId : undefined),
                 ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId } } : {}),
                 ...(input.shortcutContinuation ? { shortcutContinuation: input.shortcutContinuation } : {}),
                 merge: input.merge,
@@ -683,6 +717,26 @@ export function installScheduledBailoutRefresher(): void {
     window.setTimeout(() => { void refreshScheduledBailouts(); }, 3_000);
     // arm* 内部按 triggerKey 幂等覆盖，重复巡检只是覆盖同一行，代价极低。
     bgSetInterval(() => { void refreshScheduledBailouts(); }, 10 * 60_000);
+}
+
+/**
+ * 清空本账号名下全部离线预约。
+ *
+ * 存量任务散落在多种前缀下（followup: / reply: / idle: / timedwake: /
+ * periodcare: / shortcut:），逐条列举既容易漏、又会随功能增加而过时，
+ * 所以直接让服务端按账号全清（running 标 cancelled、pending 删除）。
+ *
+ * 刻意不做「订阅门控短路」：那条短路依赖本地缓存，缓存说没订阅、服务端
+ * 却还挂着单，正是「删了规则还在发」的典型情形——用户点这个按钮时就是
+ * 要无条件把服务端清干净，哪怕多一个请求。
+ */
+export async function purgeAllBailoutJobs(): Promise<boolean> {
+    const response = await pushJobsFetch({
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ all: true }),
+    }).catch(() => null);
+    return Boolean(response && response.ok);
 }
 
 /** 撤销追问兜底预约：带 count 只撤该轮的精确键，不带则撤该会话全部。 */

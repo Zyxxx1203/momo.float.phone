@@ -1182,8 +1182,14 @@ Deno.serve(async (req: Request) => {
                   title: deliverAsCall ? `📞 ${title}` : title,
                   body: partBody,
                   url: targetUrl,
-                  // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容
-                  ...(deliverAsCall ? { kind: "call", characterName: title, sessionId: callSessionId, callTs: Date.now() } : {}),
+                  // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容。
+                  // sessionId 让壳点击通知直达对应会话（普通消息原先没有，点开只回桌面）；
+                  // avatar 是角色头像（data URL 或直链），有就当通知大图标，没有壳用默认图。
+                  ...(callSessionId ? { sessionId: callSessionId } : {}),
+                  ...(typeof payload.notify?.avatar === "string" && payload.notify.avatar
+                    ? { avatar: payload.notify.avatar }
+                    : {}),
+                  ...(deliverAsCall ? { kind: "call", characterName: title, callTs: Date.now() } : {}),
                 },
               })),
             }),

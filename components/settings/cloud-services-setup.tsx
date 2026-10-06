@@ -155,6 +155,9 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
     // 一键排查：把「哪一段断了」变成可见结论，而不是反复猜。
     const [checking, setChecking] = useState(false);
     const [checkText, setCheckText] = useState<string | null>(null);
+    // 清空存量预约：规则删了还在发消息时的唯一解（存量任务散落在多种前缀下，逐条列举必漏）
+    const [purgeOpen, setPurgeOpen] = useState(false);
+    const [purging, setPurging] = useState(false);
 
     useEffect(() => {
         setCloudReady(isCloudBackupConfigured(loadCloudBackupConfig()));
@@ -460,6 +463,40 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         }
     };
 
+    /**
+     * 清空本账号名下全部离线预约。
+     *
+     * 刻意用动态 import：push-bailout-client 本身很大（连着一整条提示词组装链路），
+     * 顶部静态引入会把它拉进首屏加载图、改变模块求值顺序；这条链路只在点按钮时
+     * 需要，按需加载既省首屏又避免影响加载顺序。
+     */
+    const runPurgeAll = async () => {
+        if (purging) return;
+        setPurging(true);
+        try {
+            const { purgeAllBailoutJobs } = await import("@/lib/push-bailout-client");
+            const ok = await purgeAllBailoutJobs();
+            setPurgeOpen(false);
+            setResultDialog(ok
+                ? {
+                    title: "已清空存量预约",
+                    text: "服务端名下所有待发的离线预约已清除（正在执行的那条也已标记取消）。\n\n如果还有规则在生效，它们会在你下次聊天/切后台时重新挂上新预约——想彻底不再收到，请先去关掉对应规则。",
+                }
+                : {
+                    title: "清空失败",
+                    text: "服务端没有确认成功。请检查「离线推送」是否已部署、当前网络是否正常，稍后重试。",
+                });
+        } catch (err) {
+            setPurgeOpen(false);
+            setResultDialog({
+                title: "清空失败",
+                text: err instanceof Error ? err.message : String(err),
+            });
+        } finally {
+            setPurging(false);
+        }
+    };
+
     const scopeRow = (
         label: string,
         checked: boolean,
@@ -560,6 +597,16 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 {checking ? "正在逐段排查…" : "收不到主动消息？一键排查 →"}
             </button>
 
+            {/* 存量预约清空：删了规则/关了主动联系还在收到消息时用 */}
+            <button
+                type="button"
+                className="self-center text-[calc(12px*var(--app-text-scale,1))] font-semibold text-gray-500 underline underline-offset-2 hover:text-gray-700 disabled:opacity-40"
+                onClick={() => setPurgeOpen(true)}
+                disabled={Boolean(busy) || purging}
+            >
+                {purging ? "正在清空…" : "规则删了还在发消息？清空存量预约 →"}
+            </button>
+
             {/* 排查报告 */}
             {checkText !== null && (
                 <div className="modal-overlay" data-ui="modal" onClick={() => setCheckText(null)}>
@@ -587,6 +634,47 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                             </button>
                             <button type="button" className="ui-btn ui-btn-primary" onClick={() => setCheckText(null)}>
                                 关闭
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 清空存量预约：二次确认 */}
+            {purgeOpen && (
+                <div className="modal-overlay" data-ui="modal" onClick={() => { if (!purging) setPurgeOpen(false); }}>
+                    <div
+                        className="modal-dialog"
+                        role="alertdialog"
+                        aria-modal="true"
+                        aria-label="清空存量预约"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="modal-body flex flex-col gap-2">
+                            <h3 className="modal-title">清空存量预约？</h3>
+                            <p className="menu-desc !mt-0" style={{ whiteSpace: "pre-line" }}>
+                                会清掉服务端名下<strong>全部待发的离线预约</strong>——包括追问、冷场重连、定时唤醒、经期关怀等所有类型的存量任务。{"\n\n"}
+                                正在执行的那条也会被标记取消，不会再续排下一发。{"\n\n"}
+                                注意：这只是清掉「已经排好的」。如果规则还在生效，下次聊天/切后台时会重新挂上新预约——想彻底不再收到，请先关掉不想保留的规则。{"\n\n"}
+                                确定要清空吗？
+                            </p>
+                        </div>
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-outline"
+                                onClick={() => setPurgeOpen(false)}
+                                disabled={purging}
+                            >
+                                取消
+                            </button>
+                            <button
+                                type="button"
+                                className={`ui-btn ui-btn-primary ${purging ? "is-busy" : ""}`}
+                                onClick={() => void runPurgeAll()}
+                                disabled={purging}
+                            >
+                                {purging ? <><Loader2 size={15} className="animate-spin" /> 清空中…</> : "确认清空"}
                             </button>
                         </div>
                     </div>

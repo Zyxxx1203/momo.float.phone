@@ -2559,6 +2559,28 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     }, 0);
   }, []);
 
+  // 离线推送通知点击 → 壳把 App 拉起并写入 #open-chat=<sessionId> 深链。
+  // 冷启动时 hash 首帧就在，但要等聊天数据水合完（desktopReady）再开，
+  // 否则找不到会话会静默放弃；App 已在运行时壳只改 hash，走 hashchange 热启动。
+  useEffect(() => {
+    if (!desktopReady) return;
+    const consumeOpenChatHash = () => {
+      const match = window.location.hash.match(/open-chat=([^&]+)/);
+      if (!match) return;
+      const url = new URL(window.location.href);
+      // 只清 hash，保留 query（可能有来电的 ring 参数在同一路径上）
+      window.history.replaceState(null, "", url.pathname + url.search);
+      const sessionId = decodeURIComponent(match[1]);
+      if (sessionId) openChatSessionFromNotice(sessionId);
+    };
+    const bootTimer = window.setTimeout(consumeOpenChatHash, 1200);
+    window.addEventListener("hashchange", consumeOpenChatHash);
+    return () => {
+      window.clearTimeout(bootTimer);
+      window.removeEventListener("hashchange", consumeOpenChatHash);
+    };
+  }, [desktopReady, openChatSessionFromNotice]);
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{
@@ -2659,7 +2681,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       // 放在这里是因为「正在看这个会话就不打扰」的判断刚做完——用户要的正是
       // 「除当前聊天页外全线弹系统通知」，过滤逻辑与横幅共用同一处。
       if (canSendShellNotification()) {
-        sendShellNotification(title, detail.body.trim(), detail.avatar ?? char?.avatar ?? null);
+        // 第 4 个参数带会话 id：壳点通知时据此直达该会话；旧壳会忽略多余参数。
+        sendShellNotification(title, detail.body.trim(), detail.avatar ?? char?.avatar ?? null, detail.sessionId);
         return;
       }
 

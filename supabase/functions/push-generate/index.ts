@@ -1129,6 +1129,8 @@ Deno.serve(async (req: Request) => {
     if (!vapid && webSubs.length > 0) pushErrors.push("no vapid config");
     const title = payload.notify?.title || "小手机";
     const callSessionId = typeof payload.merge?.sessionId === "string" ? payload.merge.sessionId : "";
+    // 角色头像（客户端挂快照时带上，可能没有）：带进广播让壳侧显示在通知大图标上。
+    const notifyAvatar = typeof payload.notify?.avatar === "string" ? payload.notify.avatar : "";
     // 来电：单条推送（不分段），点开带 ring 参数直达振铃；正文照常进 outbox
     const targetUrl = deliverAsCall && callSessionId
       ? `/?ring=${encodeURIComponent(callSessionId)}&rt=${Date.now()}`
@@ -1182,8 +1184,12 @@ Deno.serve(async (req: Request) => {
                   title: deliverAsCall ? `📞 ${title}` : title,
                   body: partBody,
                   url: targetUrl,
-                  // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容
-                  ...(deliverAsCall ? { kind: "call", characterName: title, sessionId: callSessionId, callTs: Date.now() } : {}),
+                  // 离线通知也带会话 id 与角色头像：壳侧据此让点通知直达对应聊天、
+                  // 并在通知栏显示是谁发的（此前只回桌面、只有应用图标）。
+                  // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容。
+                  ...(callSessionId ? { sessionId: callSessionId } : {}),
+                  ...(notifyAvatar ? { avatar: notifyAvatar } : {}),
+                  ...(deliverAsCall ? { kind: "call", characterName: title, callTs: Date.now() } : {}),
                 },
               })),
             }),

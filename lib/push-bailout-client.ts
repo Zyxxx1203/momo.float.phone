@@ -158,7 +158,7 @@ export async function armReplyBailout(params: {
                     body: params.request.body,
                     providerKind: params.request.providerKind,
                 },
-                notify: { title: params.characterName, url: "/" },
+                notify: { title: params.characterName, url: "/", ...notifyAvatarField(params.sessionId) },
                 merge: {
                     sessionId: params.sessionId,
                     prevCount: 0,
@@ -309,7 +309,7 @@ export async function armFollowUpBailout(
                         body: request.body,
                         providerKind: request.providerKind,
                     },
-                    notify: { title: character.name, url: "/" },
+                    notify: { title: character.name, url: "/", ...notifyAvatarField(sessionId) },
                     ...(shortcutContinuation ? { shortcutContinuation } : {}),
                     merge: {
                         sessionId,
@@ -355,7 +355,7 @@ async function postBailoutJob(input: {
                     body: input.request.body,
                     providerKind: input.request.providerKind,
                 },
-                notify: { title: input.notifyTitle, url: "/" },
+                notify: { title: input.notifyTitle, url: "/", ...notifyAvatarField(input.merge.sessionId) },
                 ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId } } : {}),
                 ...(input.shortcutContinuation ? { shortcutContinuation: input.shortcutContinuation } : {}),
                 merge: input.merge,
@@ -399,6 +399,65 @@ export async function cancelBailoutPrefix(triggerPrefix: string, excludeKey?: st
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(excludeKey ? { triggerPrefix, excludeKey } : { triggerPrefix }),
     }).catch(() => undefined);
+}
+
+/**
+ * 清空本账号名下**全部**离线预约（含已领取但还没停手的执行体）。
+ *
+ * 为什么需要它：预约散落在多种前缀下（追问 followup:、回复兜底 reply:、
+ * 冷场重连 idle:、定时唤醒 timedwake:、经期关怀 periodcare:、快捷动作 shortcut:），
+ * 而且服务端的冷场重连会自己续排下一发。用户在界面上删掉规则只是删了本地记录，
+ * 存量任务照旧跑完——表现就是「规则早删了，主动消息还在来」。逐个前缀去撤容易漏，
+ * 这里直接请求全清；服务端会把 running 的标成 cancelled（执行体会在生成前与
+ * 续排前各查一次），再删掉全部 pending。
+ *
+ * 与 cancel* 系列不同，这里**不做订阅门控短路**：恰恰是「查不到订阅所以以为没挂过单」
+ * 的场景最需要它，跳过反而让用户清不掉。
+ */
+export async function purgeAllBailoutJobs(): Promise<{ ok: boolean; error?: string }> {
+    try {
+        const response = await pushJobsFetch({
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ all: true }),
+        });
+        if (!response) return { ok: false, error: "请求没有发出去（网络异常或接口不可达）。" };
+        const data = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
+        if (!response.ok || !data.ok) {
+            return { ok: false, error: data.error || `服务端返回 HTTP ${response.status}。` };
+        }
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : "清空请求失败。" };
+    }
+}
+
+/**
+ * 通知里带的角色头像上限。头像若是 data URL，动辄几十上百 KB；快照整体有
+ * 900KB 上限，超了会被服务端 413 拒收，**整条离线回复都不会生成**——
+ * 相较之下通知少一张头像无关紧要，所以宁可丢头像也不能丢消息。
+ */
+const NOTIFY_AVATAR_MAX_CHARS = 120_000;
+
+/** 供 notify 字段展开用：没有可用头像时返回空对象，不产生多余键。 */
+function notifyAvatarField(sessionId: unknown): { avatar?: string } {
+    const avatar = resolveNotifyAvatar(sessionId);
+    return avatar ? { avatar } : {};
+}
+
+/** 取某会话对应角色的头像（仅放行 data:image 与 http(s)，与壳的解析能力对齐）。 */
+function resolveNotifyAvatar(sessionId: unknown): string | undefined {
+    try {
+        const id = typeof sessionId === "string" ? sessionId : "";
+        if (!id) return undefined;
+        const session = loadChatSessions().find(item => item.id === id);
+        if (!session || session.isGroup) return undefined;
+        const avatar = loadCharacters().find(item => item.id === session.contactId)?.avatar?.trim() || "";
+        if (!avatar || avatar.length > NOTIFY_AVATAR_MAX_CHARS) return undefined;
+        return /^(data:image\/|https?:\/\/)/.test(avatar) ? avatar : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /** 把本地安静时段设置编成服务端可用的窗口（分钟制 + 时区偏移），未启用返回 null。 */

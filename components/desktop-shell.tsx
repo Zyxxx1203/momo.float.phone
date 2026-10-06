@@ -31,7 +31,6 @@ import ReadingApp from "@/components/reading/reading-app";
 import MapApp from "@/components/map/map-app";
 import { DwellingApp } from "@/components/dwelling/dwelling-app";
 import { MascotFloat } from "@/components/mascot/mascot-float";
-import { CallLayer } from "@/components/chat/call-layer";
 import { MascotPreviewHost } from "@/components/mascot/mascot-preview-host";
 import { useMusicControlsOptional } from "@/lib/music-context";
 import { PhoneResourcesApp, type ResourceSubPage } from "@/components/phone-resources-app";
@@ -2080,6 +2079,28 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       window.removeEventListener("hashchange", onHashChange);
     };
   }, [desktopReady]);
+
+  // ── 安卓壳：点系统通知直达对应会话 ──
+  // 壳的原生通知点击会以 #open-chat=<sessionId> 唤起本页（见 MainActivity.contentIntent）。
+  // 此前所有通知都只把 App 拉回桌面，用户点开还得自己翻是哪个角色发的——通知的
+  // 意义本来就是「点一下就看到」。冷启动与热启动（已在运行时只改 hash）都要覆盖。
+  useEffect(() => {
+    if (!desktopReady) return;
+    const consumeOpenChatHash = () => {
+      const match = window.location.hash.match(/open-chat=([^&]+)/);
+      if (!match) return;
+      const sessionId = decodeURIComponent(match[1]);
+      const url = new URL(window.location.href);
+      window.history.replaceState(null, "", url.pathname + url.search);
+      if (sessionId) openChatSessionFromNotice(sessionId);
+    };
+    const bootTimer = window.setTimeout(consumeOpenChatHash, 1200);
+    window.addEventListener("hashchange", consumeOpenChatHash);
+    return () => {
+      window.clearTimeout(bootTimer);
+      window.removeEventListener("hashchange", consumeOpenChatHash);
+    };
+  }, [desktopReady, openChatSessionFromNotice]);
 
   useEffect(() => {
     const ids = collectThemeAssetIds(draftTheme);
@@ -4935,9 +4956,6 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               <MascotFloat />
               {/* 预览弹窗宿主：独立于桌宠的展开/收起状态，否则桌宠收成小球时弹不出来 */}
               <MascotPreviewHost />
-              {/* 通话层：挂在这一层而不是聊天室里，通话才不随会话切换/回桌面而中断。
-                  缩成小窗时也留在手机界面上，与音乐球、小卷同一层级。 */}
-              <CallLayer />
 
               {/* Widget Picker Bottom Sheet */}
               {showWidgetPicker && (

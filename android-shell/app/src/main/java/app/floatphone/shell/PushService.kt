@@ -223,7 +223,7 @@ class PushService : Service() {
                         }.isSuccess
                         if (shown) return
                     }
-                    showMessageNotification(title, text2)
+                    showMessageNotification(title, text2, body.optString("avatar"), body.optString("sessionId"))
                 }
             }
 
@@ -272,11 +272,24 @@ class PushService : Service() {
         )
     }
 
-    private fun contentIntent(): PendingIntent = PendingIntent.getActivity(
-        this, 0,
-        Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        PendingIntent.FLAG_IMMUTABLE,
-    )
+    /**
+     * 点通知回到 App。带 sessionId 时走站内深链直达该会话（见 MainActivity.contentIntent）。
+     * 壳自己的 service 拿不到网页的会话数据，这里只负责把 id 原样交给主界面。
+     */
+    private fun contentIntent(sessionId: String = ""): PendingIntent {
+        val id = sessionId.trim()
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            if (id.isNotEmpty()) {
+                putExtra(MainActivity.EXTRA_OPEN_URL, "${MainActivity.SITE_URL}/#open-chat=${android.net.Uri.encode(id)}")
+            }
+        }
+        return PendingIntent.getActivity(
+            this, if (id.isEmpty()) 0 else id.hashCode(),
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
 
     private fun buildKeepAliveNotification(text: String): Notification =
         NotificationCompat.Builder(this, CH_KEEPALIVE)
@@ -351,16 +364,24 @@ class PushService : Service() {
         getSystemService(NotificationManager::class.java).notify(CallAlert.NOTIF_MISSED_ID, notification)
     }
 
-    private fun showMessageNotification(title: String, body: String) {
-        val notification = NotificationCompat.Builder(this, CH_MESSAGES)
+    /**
+     * 离线消息通知。
+     *
+     * avatar/sessionId 由服务端广播带过来（角色头像与所属会话）：带上头像，用户在
+     * 通知栏一眼就知道是谁；带上 sessionId，点通知直达那个会话而不是只回到桌面。
+     * 旧服务端不带这两个字段时两者为空，行为与从前一致。
+     */
+    private fun showMessageNotification(title: String, body: String, avatarUrl: String = "", sessionId: String = "") {
+        val builder = NotificationCompat.Builder(this, CH_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setAutoCancel(true)
-            .setContentIntent(contentIntent())
+            .setContentIntent(contentIntent(sessionId))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+        loadAvatarBitmap(avatarUrl)?.let { builder.setLargeIcon(it) }
+        val notification = builder.build()
         getSystemService(NotificationManager::class.java).notify(notifId++, notification)
         if (notifId > 400) notifId = 100
     }

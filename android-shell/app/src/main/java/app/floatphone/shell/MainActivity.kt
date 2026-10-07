@@ -507,11 +507,26 @@ class MainActivity : AppCompatActivity() {
          */
         @JavascriptInterface
         fun startCallOverlay(name: String, avatar: String, meta: String, callId: String, elapsedSeconds: Int): Boolean {
-            val allowed = CallOverlayService.canDraw(this@MainActivity)
-            runCatching {
+            // 通话接通时（App 一定在前台）就把服务暖好：窗口建出来但先藏着。
+            // 切到后台只是把已有窗口显示出来（showCallOverlay），不再从后台启动
+            // 前台服务——Android 12+ 会拒绝，浮窗于是「有时不弹」。
+            if (!CallOverlayService.canDraw(this@MainActivity)) return false
+            return runCatching {
                 CallOverlayService.start(this@MainActivity, name, avatar, meta, callId, elapsedSeconds)
-            }
-            return allowed
+                true
+            }.getOrDefault(false)
+        }
+
+        /** 切到后台：把预热好的浮窗显示出来。 */
+        @JavascriptInterface
+        fun showCallOverlay() {
+            runCatching { CallOverlayService.show(this@MainActivity) }
+        }
+
+        /** 回到前台：把浮窗藏起来（服务继续活着，下次切出去秒显）。 */
+        @JavascriptInterface
+        fun hideCallOverlay() {
+            runCatching { CallOverlayService.hide(this@MainActivity) }
         }
 
         /** 更新浮窗显示（改名/换头像/刷新时长），不重建窗口。 */
@@ -524,6 +539,16 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun stopCallOverlay() {
             runCatching { CallOverlayService.stop(this@MainActivity) }
+        }
+
+        /** 读当前快捷回复条主题键（网页侧「通话浮窗外观」用它回显选中项）。 */
+        @JavascriptInterface
+        fun getOverlayTheme(): String = CallOverlayService.currentTheme(this@MainActivity)
+
+        /** 设置快捷回复条主题键；已弹出的回复条会即时换色。 */
+        @JavascriptInterface
+        fun setOverlayTheme(key: String) {
+            runCatching { CallOverlayService.setTheme(this@MainActivity, key) }
         }
 
         /** 浮窗权限是否已授予。 */

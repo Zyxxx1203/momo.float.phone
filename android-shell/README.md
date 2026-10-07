@@ -49,8 +49,21 @@ base64 -w0 shell.keystore   # 得到一长串 base64
 | `SHELL_KEY_ALIAS` | `floatshell`（或你起的别名） |
 | `SHELL_KEY_PASSWORD` | 密钥密码 |
 
-之后每次构建的 release 包即为已签名版。注意：debug 包和 release 包
-签名不同，互相覆盖安装前要先卸载旧的。
+之后每次构建的 release 包即为已签名版。
+
+**两个包用的是同一把钥匙**（有 keystore 时 debug 也走它，见 `app/build.gradle`），
+所以 debug / release 可以互相覆盖安装，不会因为签名不同而丢数据。
+
+怎么确认自己那次构建真的签上了：
+
+1. 看 Actions 运行日志里有没有 `Decode keystore (optional)` 这一步，有 = Secrets 配上了；
+2. 下载 APK 后在本地验一次签名：
+   ```bash
+   apksigner verify --print-certs app-release.apk
+   ```
+   输出里的证书指纹应与你 keytool 生成的那把完全一致。
+3. 四个 Secret 缺任何一个都会静默退化成「未签名包」，此时 release 装不上——
+   以 Actions 日志第 1 步是否执行为准。
 
 ## 安装与首次设置
 

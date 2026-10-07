@@ -9,11 +9,20 @@
 // 只负责「显示」：通话本身（识别 / 播放 / 计时）在各通话屏里继续跑，
 // 这里是回到全屏的入口，不碰任何通话逻辑。
 //
+// 三种手势（与安卓壳原生浮窗对齐，切换环境时手感一致）：
+//   · 轻点 → 回全屏通话；
+//   · 拖动 → 挪位置（右下角拖拽缩放）；
+//   · 长按 → 就地弹出快捷回复条，不跳回通话界面。
+// 长按弹回复这一点原先只有桌面原生浮窗有，手机里的小窗没有，于是长按
+// 被当成「没有位移的轻点」直接跳回通话页——本文件补齐。
+//
 // 用 portal 挂到 body：手机壳内部有 overflow / transform 布局，
 // 直接挂在里面时 fixed 定位可能被裁剪或算错参照点。
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+import { loadCallOverlayTheme, resolveCallOverlayTheme, subscribeCallOverlayTheme } from "@/lib/call-overlay-theme";
 
 type CallMiniWindowProps = {
     /** 小窗背景图（角色头像 / 通话背景），没有就用纯色底 */
@@ -26,6 +35,9 @@ type CallMiniWindowProps = {
     ariaLabel: string;
     /** 点一下小窗（没有拖动）时回到全屏通话 */
     onRestore?: () => void;
+    /** 长按小窗弹出的快捷回复：与通话界面里的输入走同一条通路。
+     *  不传则不弹输入条（长按等同轻点，保持旧行为）。 */
+    onReply?: (text: string) => void;
 };
 
 const MIN_W = 88;
@@ -38,6 +50,10 @@ const DEFAULT_H = 150;
 const EDGE = 14;
 /** 拖动判定阈值：位移超过它才算拖动，否则算点击 */
 const DRAG_SLOP = 5;
+/** 长按判定：按住这么久且没位移 = 弹快捷回复条（与原生浮窗的 480ms 对齐） */
+const LONG_PRESS_MS = 480;
+/** 回复条的最小宽度：小窗最窄只有 88px，塞输入框进去字都看不清 */
+const REPLY_MIN_W = 236;
 const STORAGE_KEY = "call-mini-window-geometry-v1";
 
 type Geometry = { x: number; y: number; w: number; h: number };
@@ -91,9 +107,21 @@ function readStoredGeometry(): Geometry | null {
     }
 }
 
-export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore }: CallMiniWindowProps) {
+export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, onReply }: CallMiniWindowProps) {
     const [geo, setGeo] = useState<Geometry>(() => defaultGeometry());
     const [mounted, setMounted] = useState(false);
+    // 长按弹出的快捷回复条。原生浮窗那边是另开一个独立窗口，网页里没有窗口
+    // 概念，就把一条 fixed 输入条挂在小窗旁边，发完自动收起。
+    const [showReply, setShowReply] = useState(false);
+    const [replyText, setReplyText] = useState("");
+    // 回复条配色：与壳里那条原生回复条共用同一批主题键，选一次两边都变
+    const [theme, setTheme] = useState(() => resolveCallOverlayTheme(loadCallOverlayTheme()));
+    useEffect(() => subscribeCallOverlayTheme(key => setTheme(resolveCallOverlayTheme(key))), []);
+    const replyInputRef = useRef<HTMLInputElement | null>(null);
+    const longPressRef = useRef<number | null>(null);
+    // 长按是否已触发：抬手时不能再当成「轻点回全屏」，
+    // 否则长按弹输入条的同时会顺带跳回通话界面。
+    const longPressFiredRef = useRef(false);
     const geoRef = useRef(geo);
     const dragRef = useRef<{ id: number; startX: number; startY: number; originX: number; originY: number; moved: boolean } | null>(null);
     const resizeRef = useRef<{ id: number; startX: number; startY: number; originW: number; originH: number; moved: boolean } | null>(null);
@@ -130,9 +158,21 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore }: 
         return () => window.clearTimeout(id);
     }, [geo]);
 
+    const clearLongPress = useCallback(() => {
+        if (longPressRef.current !== null) {
+            window.clearTimeout(longPressRef.current);
+            longPressRef.current = null;
+        }
+    }, []);
+
+    // 组件卸载时清掉挂起的长按定时器，免得在已卸载的组件上 setState
+    useEffect(() => clearLongPress, [clearLongPress]);
+
     const handleDragDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
         // 右下角缩放柄自己处理指针，不参与拖动
         if ((event.target as HTMLElement).closest("[data-call-mini-resize]")) return;
+        // 回复条内部的指针（选中文字、点按钮）不参与拖动
+        if ((event.target as HTMLElement).closest("[data-call-mini-reply]")) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         dragRef.current = {
             id: event.pointerId,
@@ -142,28 +182,47 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore }: 
             originY: geoRef.current.y,
             moved: false,
         };
-    }, []);
+        // 长按用延时任务判定，而不是抬手时看按住时长：
+        // 按住约半秒就立刻弹出输入条，不用等手指抬起（与原生浮窗一致）。
+        longPressFiredRef.current = false;
+        if (onReply) {
+            longPressRef.current = window.setTimeout(() => {
+                longPressRef.current = null;
+                longPressFiredRef.current = true;
+                dragRef.current = null;
+                setShowReply(true);
+            }, LONG_PRESS_MS);
+        }
+    }, [onReply]);
 
     const handleDragMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
         const drag = dragRef.current;
         if (!drag || drag.id !== event.pointerId) return;
         const dx = event.clientX - drag.startX;
         const dy = event.clientY - drag.startY;
-        if (!drag.moved && Math.abs(dx) + Math.abs(dy) > DRAG_SLOP) drag.moved = true;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) > DRAG_SLOP) {
+            drag.moved = true;
+            // 一旦移动就取消长按：拖动时不该弹出输入条
+            clearLongPress();
+        }
         if (!drag.moved) return;
         setGeo(prev => clampGeometry({ ...prev, x: drag.originX + dx, y: drag.originY + dy }));
-    }, []);
+    }, [clearLongPress]);
 
     const handleDragUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
         const drag = dragRef.current;
         if (!drag || drag.id !== event.pointerId) return;
         dragRef.current = null;
+        clearLongPress();
+        // 长按已经弹了输入条：这一下不算点击，别把通话界面又拉回来
+        if (longPressFiredRef.current) return;
         // 没移动 = 点击：回全屏。拖动过就不触发，免得手一抖就跳回通话界面
         if (!drag.moved) onRestore?.();
-    }, [onRestore]);
+    }, [clearLongPress, onRestore]);
 
     const handleResizeDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
         event.stopPropagation();
+        clearLongPress();
         event.currentTarget.setPointerCapture(event.pointerId);
         resizeRef.current = {
             id: event.pointerId,
@@ -189,6 +248,21 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore }: 
         if (!resize || resize.id !== event.pointerId) return;
         resizeRef.current = null;
     }, []);
+
+    // 输入条弹出后自动聚焦（移动端键盘随之而来）
+    useEffect(() => {
+        if (!showReply) return;
+        const id = window.setTimeout(() => replyInputRef.current?.focus(), 30);
+        return () => window.clearTimeout(id);
+    }, [showReply]);
+
+    const submitReply = useCallback(() => {
+        const text = replyText.trim();
+        setShowReply(false);
+        setReplyText("");
+        // 与通话界面里手动输入完全同一条通路：会落聊天记录、触发角色回复与 TTS
+        if (text) onReply?.(text);
+    }, [onReply, replyText]);
 
     if (!mounted) return null;
 
@@ -293,5 +367,98 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore }: 
         </div>
     );
 
-    return createPortal(node, document.body);
+    // 长按弹出的快捷回复条：挂在小窗正上方（贴不到就落回窗口下方），
+    // 宽度至少 REPLY_MIN_W —— 小窗本身可能只有 88px 宽，塞不下输入框。
+    const replyBarW = Math.max(geo.w, REPLY_MIN_W);
+    const vp = viewport();
+    const replyLeft = Math.min(Math.max(EDGE, geo.x + geo.w - replyBarW), Math.max(EDGE, vp.w - replyBarW - EDGE));
+    const replyAbove = geo.y - 46 >= EDGE;
+    const replyTop = replyAbove ? geo.y - 46 : Math.min(geo.y + geo.h + 8, vp.h - 54);
+
+    const replyNode = showReply ? (
+        <div
+            data-call-mini-reply=""
+            style={{
+                position: "fixed",
+                left: replyLeft,
+                top: replyTop,
+                width: replyBarW,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 8px",
+                borderRadius: 12,
+                background: theme.bar,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.42)",
+                zIndex: 9001,
+                touchAction: "manipulation",
+            }}
+        >
+            <input
+                ref={replyInputRef}
+                value={replyText}
+                onChange={(event) => setReplyText(event.target.value)}
+                onKeyDown={(event) => {
+                    // 回车发送，与通话界面输入框一致；Esc 收起
+                    if (event.key === "Enter") { event.preventDefault(); submitReply(); }
+                    if (event.key === "Escape") { event.preventDefault(); setShowReply(false); setReplyText(""); }
+                }}
+                placeholder="说点什么…"
+                aria-label="快捷回复"
+                style={{
+                    flex: 1,
+                    minWidth: 0,
+                    border: "none",
+                    outline: "none",
+                    background: "transparent",
+                    color: theme.text,
+                    fontSize: 13,
+                    padding: "4px 2px",
+                }}
+            />
+            <button
+                type="button"
+                onClick={submitReply}
+                disabled={!replyText.trim()}
+                aria-label="发送"
+                style={{
+                    flexShrink: 0,
+                    border: "none",
+                    borderRadius: 8,
+                    padding: "5px 11px",
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    color: "#fff",
+                    background: replyText.trim() ? theme.accent : "rgba(128,128,128,0.28)",
+                    cursor: replyText.trim() ? "pointer" : "default",
+                }}
+            >
+                发送
+            </button>
+            {/* 回到全屏通话：长按弹条后不想再靠「轻点小窗」跳转时走这里 */}
+            <button
+                type="button"
+                onClick={() => { setShowReply(false); setReplyText(""); onRestore?.(); }}
+                aria-label="回到通话界面"
+                title="回到通话界面"
+                style={{
+                    flexShrink: 0,
+                    display: "flex",
+                    border: "none",
+                    background: "transparent",
+                    color: theme.muted,
+                    padding: 4,
+                    cursor: "pointer",
+                }}
+            >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 3h6v6" />
+                    <path d="M10 14L21 3" />
+                    <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+                </svg>
+            </button>
+        </div>
+    ) : null;
+
+    return createPortal(<>{node}{replyNode}</>, document.body);
 }

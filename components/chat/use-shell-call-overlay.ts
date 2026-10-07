@@ -16,11 +16,14 @@ import { useEffect, useRef, useState } from "react";
 
 import {
     ensureShellOverlayListener,
+    hideShellCallOverlay,
     requestOverlayPermission,
+    showShellCallOverlay,
     startShellCallOverlay,
     stopShellCallOverlay,
     subscribeShellOverlayEvents,
     supportsCallOverlay,
+    supportsOverlayShowHide,
     updateShellCallOverlay,
 } from "@/lib/shell-call-overlay";
 
@@ -67,32 +70,87 @@ export function useShellCallOverlay(params: UseShellCallOverlayParams) {
         return () => document.removeEventListener("visibilitychange", onVisibility);
     }, []);
 
-    // 顶出 / 收起浮窗
+    // 浮窗服务是否已经暖好（start 过、还没 stop）
+    const overlayStartedRef = useRef(false);
+    // 这一版壳是否支持「预热 + 显示/隐藏」的浮窗生命周期
+    const supportsPrewarm = typeof window !== "undefined" && supportsOverlayShowHide();
+
+    // ── 浮窗生命周期 ──
+    //
+    // 新壳（有 show/hide）：通话一接通、App 还在前台时就把服务暖好（窗口先藏着）；
+    // 切到后台只 show，回到前台只 hide，服务全程活着。这样既不会撞上 Android 12+
+    // 「后台禁止启动前台服务」的限制（那正是「浮窗有时不弹、声音却照旧」的成因），
+    // 也不会因为反复 start/stop 把计时清零。
+    //
+    // 老壳（1.0.4 及以前，只有 start/stop，且 start 会立刻显示窗口）：退回旧行为——
+    // 切到后台才 start、回到前台就 stop。预热方案在老壳上会把浮窗糊在通话界面上。
+    //
+    // 依赖里刻意不放 name/avatar/label：它们变化只该走 update，
+    // 进了依赖会让浮窗跟着重建、计时归零。
     useEffect(() => {
         if (!supported) return;
+        const handlers = handlersRef.current;
+
+        if (!supportsPrewarm) {
+            if (params.active && pageHidden) {
+                const allowed = startShellCallOverlay({
+                    name: handlers.name,
+                    avatar: handlers.avatar,
+                    meta: [handlers.label, "{{time}}"],
+                    callId: callIdRef.current,
+                    elapsedSeconds: handlers.getDuration(),
+                });
+                setShowPermissionHint(!allowed);
+            } else {
+                setShowPermissionHint(false);
+                stopShellCallOverlay();
+            }
+            return;
+        }
+
         if (!params.active) {
+            overlayStartedRef.current = false;
             stopShellCallOverlay();
             return;
         }
-        // App 在前台不顶浮窗：界面内的通话屏已够用，省得两层叠着
-        if (!pageHidden) {
+        if (!overlayStartedRef.current) {
+            overlayStartedRef.current = true;
+            const allowed = startShellCallOverlay({
+                name: handlers.name,
+                avatar: handlers.avatar,
+                // {{time}} 交给原生替换成它自己维护的计时：WebView 被冻结也不停
+                meta: [handlers.label, "{{time}}"],
+                callId: callIdRef.current,
+                // 带上网页已通话秒数，否则原生从 0 起数，两边时长对不上
+                elapsedSeconds: handlers.getDuration(),
+            });
+            setShowPermissionHint(!allowed);
+        }
+        if (pageHidden) {
+            showShellCallOverlay();
+        } else {
             setShowPermissionHint(false);
-            stopShellCallOverlay();
-            return;
+            hideShellCallOverlay();
         }
-        const allowed = startShellCallOverlay({
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [supported, supportsPrewarm, params.active, pageHidden]);
+
+    // 名字 / 头像 / 通话类型变了：只更新内容，不重建窗口
+    useEffect(() => {
+        if (!supported || !params.active) return;
+        // 新壳要等服务暖好；老壳没有预热概念，start 时已带上当时的值
+        if (supportsPrewarm && !overlayStartedRef.current) return;
+        updateShellCallOverlay({
             name: params.name,
             avatar: params.avatar,
-            // {{time}} 交给原生替换成它自己维护的计时：WebView 被冻结也不停
             meta: [params.label, "{{time}}"],
-            callId: callIdRef.current,
-            // 带上网页已通话秒数，否则原生从 0 起数，两边时长对不上
-            elapsedSeconds: params.getDuration(),
         });
-        setShowPermissionHint(!allowed);
-    }, [supported, pageHidden, params.active, params.name, params.avatar, params.label]);
+    }, [supported, supportsPrewarm, params.active, params.name, params.avatar, params.label]);
 
-    // 后台期间定期回灌时长，纠正两边漂移
+    // 后台期间定期回灌时长，纠正两边漂移。
+    //
+    // 只前进不后退由两侧共同把关：这里 getDuration() 走墙钟推算（不读会被
+    // 冻结的 state），原生侧也只接受「比它自己算出来的更大」的值。
     useEffect(() => {
         if (!supported || !pageHidden || !params.active) return;
         const timer = window.setInterval(() => {
@@ -143,7 +201,10 @@ export function useShellCallOverlay(params: UseShellCallOverlayParams) {
     // 卸载时收掉浮窗
     useEffect(() => {
         if (!supported) return;
-        return () => { stopShellCallOverlay(); };
+        return () => {
+            overlayStartedRef.current = false;
+            stopShellCallOverlay();
+        };
     }, [supported]);
 
     return {

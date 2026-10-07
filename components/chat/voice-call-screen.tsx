@@ -25,7 +25,8 @@ import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
 import { type CallAutoChatConfig, MAX_TURNS_LIMIT, MIN_INTERVAL_SECONDS, loadCallAutoChatConfig, randomAutoChatDelaySeconds, saveCallAutoChatConfig } from "@/lib/call-auto-chat";
-import { ensureShellOverlayListener, isShellEnvironment, requestOverlayPermission, startShellCallOverlay, stopShellCallOverlay, subscribeShellOverlayEvents, supportsCallOverlay, updateShellCallOverlay } from "@/lib/shell-call-overlay";
+import { isShellEnvironment, stopShellCallOverlay } from "@/lib/shell-call-overlay";
+import { useShellCallOverlay } from "./use-shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
 
@@ -121,8 +122,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // 自动搭话：进通话时读一次配置；改动即时存盘并热生效
     const [autoChatConfig, setAutoChatConfig] = useState<CallAutoChatConfig>(() => loadCallAutoChatConfig());
     const [showAutoChatPanel, setShowAutoChatPanel] = useState(false);
-    // 安卓壳里：切到别的 App 时用原生浮窗顶上（浮窗权限未开时给一条引导）
-    const [showOverlayHint, setShowOverlayHint] = useState(false);
+    // 安卓壳里：切到别的 App 时用原生浮窗顶上（浮窗权限未开时给一条引导）。
+    // 具体接线与引导标记由 useShellCallOverlay 提供，见下方调用处。
     // 自动搭话按钮的位置（可拖动，拖动后记在本地，下次通话沿用）
     const [autoChatPos, setAutoChatPos] = useState<{ x: number | null; y: number }>(() => {
         if (typeof window === "undefined") return { ...AUTO_CHAT_DEFAULT_POS };
@@ -156,10 +157,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const emptyAutoTurnsRef = useRef(0);
     // 配置的 ref 快照：心跳里读最新值，不必因设置变化重建定时器
     const autoChatConfigRef = useRef<CallAutoChatConfig>(autoChatConfig);
-    // 本次通话的 id：原生浮窗事件带上它，用来确认事件属于当前这一通
-    const shellCallIdRef = useRef(`call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     // handleHangup 依赖 callDuration（每秒都变），直接进 effect 依赖会让监听器
     // 每秒重装一次；用 ref 转发，订阅只建立一次。
+    // （本次通话 id、原生事件订阅、计时校准都交给 useShellCallOverlay 了）
     const hangupRef = useRef<() => void>(() => {});
     // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
     const callDurationRef = useRef(0);
@@ -524,43 +524,13 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── 安卓壳原生浮窗 ──────────────────────────────
     //
-    // 通话中切到别的 App 时，网页小窗会随浏览器一起被切走；壳里的原生浮窗
-    // （CallOverlayService）能浮在任何 App 上层。触发条件用「页面是否可见」
-    // 而不是「是否按了缩小键」——用户直接切走而不点缩小时同样要顶出来。
-    const shellOverlaySupported = typeof window !== "undefined" && supportsCallOverlay();
-    const [pageHidden, setPageHidden] = useState(false);
-
-    useEffect(() => {
-        if (typeof document === "undefined") return;
-        const onVisibility = () => setPageHidden(document.visibilityState === "hidden");
-        document.addEventListener("visibilitychange", onVisibility);
-        onVisibility();
-        return () => document.removeEventListener("visibilitychange", onVisibility);
-    }, []);
-
-    useEffect(() => {
-        if (!shellOverlaySupported) return;
-        if (callState === "ENDED" || callState === "CONNECTING") {
-            stopShellCallOverlay();
-            return;
-        }
-        // App 在前台时不顶浮窗：界面内的通话屏/小窗已经够用，省得两层叠着
-        if (!pageHidden) {
-            setShowOverlayHint(false);
-            stopShellCallOverlay();
-            return;
-        }
-        const allowed = startShellCallOverlay({
-            name: character.name,
-            avatar: bgImageResolved || character.avatar || null,
-            // {{time}} 交给原生替换成它自己维护的计时：WebView 被冻结也不停
-            meta: ["语音通话", "{{time}}"],
-            callId: shellCallIdRef.current,
-        });
-        // 没权限时给出引导（浮窗要用户手动去系统设置里开）
-        setShowOverlayHint(!allowed);
-        return () => { /* 由上面的分支负责收掉 */ };
-    }, [shellOverlaySupported, pageHidden, callState, character.name, character.avatar, bgImageResolved]);
+    // 原实现在这里手写接线，有两个坑：
+    //   1. 依赖数组里放了 callState。通话中状态每秒都在 IDLE / 聆听 / 思考 / 说话
+    //      之间跳，effect 每跳一次就 stop + start，浮窗被整个拆了重建、计时归零，
+    //      表现为「一说话时长就跳、不说话又变回 0」。
+    //   2. 启动时没带 elapsedSeconds，原生只能从 0 起数。
+    // 现已统一改用 useShellCallOverlay（视频/群聊通话早就走它）：内部按「是否已接通」
+    // 判定，状态切换不重建浮窗，并会把网页已通话秒数带给原生做基准。
 
     // ── 自动搭话：心跳 ───────────────────────────────
     //
@@ -800,81 +770,47 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd]);
 
-    // 通话屏卸载（挂断收尾、切会话、整页刷新）时务必收掉原生浮窗，
-    // 否则会在桌面上留一个再也点不动的悬空小窗。
-    useEffect(() => {
-        if (!shellOverlaySupported) return;
-        return () => { stopShellCallOverlay(); };
-    }, [shellOverlaySupported]);
-
-    // 原生浮窗事件回灌：时长、快捷回复、回到全屏、挂断。
-    // 必须放在 handleHangup 之后——它引用了这个 useCallback，位置提前会在
-    // 渲染时撞上 const 的暂时性死区直接抛错。
-    useEffect(() => {
-        if (!shellOverlaySupported) return;
-        ensureShellOverlayListener();
-        return subscribeShellOverlayEvents((event) => {
-            // 只认当前这一通的事件，换通话后旧事件丢弃
-            if (event.callId && event.callId !== shellCallIdRef.current) return;
-            switch (event.action) {
-                case "reply": {
-                    const text = (event.text || "").trim();
-                    if (!text) return;
-                    // 与界面里手动输入完全同一条通路：会落聊天记录、触发角色回复与 TTS
-                    if (stateRef.current === "IDLE") void runConversationTurn(text);
-                    return;
-                }
-                case "tick": {
-                    // 原生计时校准：只前进、不后退。
-                    // 页面在后台被冻结时网页计时会落后，以原生为准把基准推上去；
-                    // 反过来（原生更小）一律忽略，否则时长来回跳，
-                    // 挂断时写进聊天记录的时长也跟着乱。
-                    if (typeof event.seconds === "number" && event.seconds > callDurationRef.current) {
-                        callStartRef.current = Date.now() - event.seconds * 1000;
-                        callDurationRef.current = event.seconds;
-                        setCallDuration(event.seconds);
-                    }
-                    return;
-                }
-                case "restore":
-                    onRestore?.();
-                    return;
-                case "hangup":
-                    hangupRef.current();
-                    return;
-                default:
-                    return;
-            }
-        });
-    }, [shellOverlaySupported, runConversationTurn, onRestore]);
-
-    // 保持 ref 指向最新的 handleHangup
+    // 保持 ref 指向最新的 handleHangup（原生浮窗的挂断事件要调到它）
     useEffect(() => { hangupRef.current = handleHangup; }, [handleHangup]);
 
-    // 时长校准：页面在后台且浮窗挂着时，定期把网页侧时长回灌给原生。
-    // 单独一个 effect 而不是并进启动 effect——callDuration 每秒都变，
-    // 一旦进依赖就会让浮窗每秒重建一次。
-    useEffect(() => {
-        if (!shellOverlaySupported || !pageHidden) return;
-        if (callState === "ENDED" || callState === "CONNECTING") return;
-        const timer = window.setInterval(() => {
-            updateShellCallOverlay({
-                name: character.name,
-                avatar: bgImageResolved || character.avatar || null,
-                meta: ["语音通话", "{{time}}"],
-                elapsedSeconds: callDurationRef.current,
-            });
-        }, 10000);
-        return () => window.clearInterval(timer);
-    }, [shellOverlaySupported, pageHidden, callState, character.name, character.avatar, bgImageResolved]);
+    // ── 接入原生浮窗 ──
+    //
+    // 必须放在 handleHangup / runConversationTurn 定义之后：下面这个钩子的
+    // 参数直接引用它们，位置提前会撞上 const 的暂时性死区，渲染即抛错。
+    const shellOverlay = useShellCallOverlay({
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+        label: "语音通话",
+        name: character.name,
+        avatar: bgImageResolved || character.avatar || null,
+        // 墙钟推算而不是直接读 callDurationRef：页面在后台被系统冻结时，
+        // 那个 state 的镜像会停在旧值，回灌给原生反而把浮窗时长往回拽。
+        getDuration: () => Math.max(
+            callDurationRef.current,
+            callStartRef.current ? Math.floor((Date.now() - callStartRef.current) / 1000) : 0,
+        ),
+        onReply: (text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); },
+        onHangup: () => hangupRef.current(),
+        onRestore,
+        onTick: (seconds) => {
+            // 原生计时校准：只前进、不后退。
+            // 网页在后台被冻结时计时会落后，以原生为准把基准推上去；
+            // 反过来（原生更小）一律忽略，否则时长来回跳，
+            // 挂断时写进聊天记录的时长也跟着乱。
+            if (seconds > callDurationRef.current) {
+                callStartRef.current = Date.now() - seconds * 1000;
+                callDurationRef.current = seconds;
+                setCallDuration(seconds);
+            }
+        },
+    });
 
-    // 浮窗权限未开时的引导条
+    // 浮窗权限未开时的引导条（钩子里给标记，这里管自动消失）
     useEffect(() => {
-        if (!showOverlayHint) return;
-        const done = () => setShowOverlayHint(false);
+        if (!shellOverlay.showPermissionHint) return;
+        const done = () => shellOverlay.dismissPermissionHint();
         const timer = window.setTimeout(done, 12000);
         return () => window.clearTimeout(timer);
-    }, [showOverlayHint]);
+    }, [shellOverlay.showPermissionHint]);
 
     // ── 自动搭话按钮的拖动（指针事件；拖过就不触发开关） ──
     const handleAutoChatPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
@@ -935,6 +871,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 meta={[callState === "ENDED" ? "通话已结束" : "语音通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的语音通话`}
                 onRestore={onRestore}
+                // 长按小窗就地回复，不必先跳回通话界面
+                onReply={(text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); }}
             />
         );
     }
@@ -953,10 +891,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             <CallVolumeControl />
 
             {/* 浮窗权限未开：切出去时给一条引导（只在壳里、且确实触发过时出现） */}
-            {showOverlayHint && isShellEnvironment() && (
+            {shellOverlay.showPermissionHint && isShellEnvironment() && (
                 <div
                     role="button"
-                    onClick={() => { requestOverlayPermission(); setShowOverlayHint(false); }}
+                    onClick={() => { shellOverlay.requestPermission(); shellOverlay.dismissPermissionHint(); }}
                     style={{
                         position: "absolute", top: 100, left: 12, right: 12, zIndex: 40,
                         padding: "9px 12px", borderRadius: 12,

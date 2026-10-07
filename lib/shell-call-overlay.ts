@@ -21,8 +21,14 @@ type ShellBridgeLike = {
     canDrawOverlay?: () => boolean;
     requestOverlayPermission?: () => void;
     startCallOverlay?: (name: string, avatar: string, meta: string, callId: string, elapsedSeconds: number) => boolean;
+    /** 切到后台：显示预热好的浮窗；回到前台：藏起来（服务继续活着） */
+    showCallOverlay?: () => void;
+    hideCallOverlay?: () => void;
     updateCallOverlay?: (name: string, avatar: string, meta: string, elapsedSeconds: number) => void;
     stopCallOverlay?: () => void;
+    /** 快捷回复条配色主题（存在壳侧 SharedPreferences） */
+    getOverlayTheme?: () => string;
+    setOverlayTheme?: (key: string) => void;
     isAccessibilityConnected?: () => boolean;
     openAccessibilitySettings?: () => void;
 };
@@ -126,6 +132,64 @@ export function updateShellCallOverlay(params: {
     } catch {
         /* 浮窗不在或 WebView 已销毁，忽略 */
     }
+}
+
+/**
+ * 显示浮窗（页面转入后台时调用）。
+ *
+ * 浮窗服务在通话接通、App 还在前台时就已经预热好了，这里只是把窗口亮出来。
+ * 过去是在这一刻才去启动前台服务，而 Android 12+ 禁止后台启动前台服务，
+ * 于是浮窗时不时不弹。
+ */
+export function showShellCallOverlay(): void {
+    const b = bridge();
+    if (!b?.showCallOverlay) return;
+    try {
+        b.showCallOverlay();
+    } catch {
+        /* 忽略 */
+    }
+}
+
+/** 隐藏浮窗（回到 App 前台时调用）。服务继续运行，下次切出去秒显。 */
+export function hideShellCallOverlay(): void {
+    const b = bridge();
+    if (!b?.hideCallOverlay) return;
+    try {
+        b.hideCallOverlay();
+    } catch {
+        /* 忽略 */
+    }
+}
+
+/** 壳是否支持「预热后显示/隐藏」这套浮窗生命周期（老 APK 没有）。 */
+export function supportsOverlayShowHide(): boolean {
+    return typeof bridge()?.showCallOverlay === "function";
+}
+
+/** 读当前快捷回复条主题键（非壳环境返回空串）。 */
+export function getShellOverlayTheme(): string {
+    try {
+        return bridge()?.getOverlayTheme?.() ?? "";
+    } catch {
+        return "";
+    }
+}
+
+/** 设置快捷回复条主题键；已弹出的回复条会即时换色。 */
+export function setShellOverlayTheme(key: string): void {
+    const b = bridge();
+    if (!b?.setOverlayTheme) return;
+    try {
+        b.setOverlayTheme(key);
+    } catch {
+        /* 忽略 */
+    }
+}
+
+/** 壳是否支持自定义回复条主题（老 APK 没有）。 */
+export function supportsOverlayTheme(): boolean {
+    return typeof bridge()?.setOverlayTheme === "function";
 }
 
 /** 收掉原生浮窗 */

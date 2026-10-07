@@ -50,6 +50,41 @@ import java.util.concurrent.TimeUnit
  * 前台服务：Android 8+ 后台服务随时可被杀，故 startForeground 常驻，
  * 顺带把进程钉住，网页的 TTS 才不至于切走后被掐。
  */
+/**
+ * 长按浮窗弹出的快捷回复条配色。
+ *
+ * 原先这些颜色写死在本文件里（深底 + 蓝按钮），想换只能改代码重编。现在抽成几套
+ * 预设：网页侧「设置 → 通话浮窗外观」选一套，键名经 AndroidShell.setOverlayTheme()
+ * 存进 SharedPreferences；换主题时已弹出的回复条就地重绘，不用重开通话。
+ */
+data class ReplyTheme(
+    val key: String,
+    val label: String,
+    /** 条身底色 */
+    val bar: Int,
+    /** 输入文字 */
+    val text: Int,
+    /** 占位文字 */
+    val hint: Int,
+    /** 发送键底色 */
+    val accent: Int,
+    /** 次要按钮（收起 / 回到通话）文字 */
+    val muted: Int,
+) {
+    companion object {
+        val DARK = ReplyTheme("dark", "暗夜", 0xF21B1B22.toInt(), Color.WHITE, 0xFF8A93A6.toInt(), 0xFF3B82F6.toInt(), 0xFFC9D1E0.toInt())
+        val LIGHT = ReplyTheme("light", "浅色", 0xF2FFFFFF.toInt(), 0xFF1B1B22.toInt(), 0xFF8A93A6.toInt(), 0xFF3B82F6.toInt(), 0xFF5A6270.toInt())
+        val OCEAN = ReplyTheme("ocean", "深海", 0xF20E1A2B.toInt(), Color.WHITE, 0xFF7E8DA6.toInt(), 0xFF4C8DFF.toInt(), 0xFF9FB0C9.toInt())
+        val SAKURA = ReplyTheme("sakura", "樱粉", 0xF22A1B24.toInt(), Color.WHITE, 0xFFB08A9C.toInt(), 0xFFE56B9A.toInt(), 0xFFC9A3B3.toInt())
+        val BAMBOO = ReplyTheme("bamboo", "青竹", 0xF2152419.toInt(), Color.WHITE, 0xFF8AA694.toInt(), 0xFF30A46C.toInt(), 0xFFA3C9B3.toInt())
+        val VIOLET = ReplyTheme("violet", "夜幕", 0xF21D182B.toInt(), Color.WHITE, 0xFF938AA6.toInt(), 0xFF9B6BFF.toInt(), 0xFFB3A9C9.toInt())
+
+        val ALL = listOf(DARK, LIGHT, OCEAN, SAKURA, BAMBOO, VIOLET)
+
+        fun of(key: String?): ReplyTheme = ALL.firstOrNull { it.key == key } ?: DARK
+    }
+}
+
 class CallOverlayService : Service() {
 
     companion object {
@@ -58,6 +93,10 @@ class CallOverlayService : Service() {
         private const val PREFS = "call_overlay_prefs"
 
         const val ACTION_START = "app.floatphone.shell.OVERLAY_START"
+        /** 切到后台：把预热好的窗口显示出来（不再从后台启动服务） */
+        const val ACTION_SHOW = "app.floatphone.shell.OVERLAY_SHOW"
+        /** 回到前台：把窗口藏起来，服务继续活着，下次切后台秒显 */
+        const val ACTION_HIDE = "app.floatphone.shell.OVERLAY_HIDE"
         const val ACTION_UPDATE = "app.floatphone.shell.OVERLAY_UPDATE"
         const val ACTION_STOP = "app.floatphone.shell.OVERLAY_STOP"
 
@@ -67,6 +106,10 @@ class CallOverlayService : Service() {
         const val EXTRA_CALL_ID = "call_id"
         /** 网页传来的「已通话秒数」——浮窗是切出去才建的，不能从 0 自己数 */
         const val EXTRA_ELAPSED = "elapsed"
+
+        /** 快捷回复条的配色主题键（在网页侧「通话浮窗外观」里选，存 SharedPreferences） */
+        const val PREF_THEME = "overlay_theme"
+        const val THEME_DEFAULT = "dark"
 
         private const val MIN_W_DP = 88
         private const val MIN_H_DP = 120
@@ -110,6 +153,47 @@ class CallOverlayService : Service() {
             runCatching {
                 context.startService(Intent(context, CallOverlayService::class.java).apply { action = ACTION_STOP })
             }
+        }
+
+        /**
+         * 显示浮窗（App 刚切到后台时调用）。
+         *
+         * 注意这里用 startService 而不是 startForegroundService：服务在通话接通时
+         * 就已经在前台预热好了（见 ACTION_START 注释）。Android 12+ 禁止 App 在
+         * 后台启动前台服务，而「切出去」正是后台——过去在这里调 startForegroundService，
+         * 被系统拒绝、异常又被吞掉，表现就是「浮窗有时不弹，但声音照旧」。
+         */
+        fun show(context: Context) {
+            if (!running) return
+            runCatching {
+                context.startService(Intent(context, CallOverlayService::class.java).apply { action = ACTION_SHOW })
+            }
+        }
+
+        /** 隐藏浮窗（回到 App 前台时调用）：服务继续活着，下次切出去秒显。 */
+        fun hide(context: Context) {
+            if (!running) return
+            runCatching {
+                context.startService(Intent(context, CallOverlayService::class.java).apply { action = ACTION_HIDE })
+            }
+        }
+
+        /** 正在运行的实例：主题改动时用它把已弹出的回复条就地重绘。 */
+        @Volatile
+        private var liveInstance: CallOverlayService? = null
+
+        /** 主题键（见 ReplyTheme）。存进 SharedPreferences，下次通话沿用。 */
+        fun currentTheme(context: Context): String =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(PREF_THEME, THEME_DEFAULT) ?: THEME_DEFAULT
+
+        fun setTheme(context: Context, key: String) {
+            val safe = ReplyTheme.of(key).key
+            runCatching {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString(PREF_THEME, safe).apply()
+            }
+            liveInstance?.applyTheme(safe)
         }
 
         /** 浮窗权限是否已授予（Android 6+ 需用户在系统设置里手动开）。 */
@@ -162,6 +246,12 @@ class CallOverlayService : Service() {
                 showOverlay()
                 startHeartbeat()
             }
+            ACTION_SHOW -> {
+                showOverlay()
+            }
+            ACTION_HIDE -> {
+                rootView?.visibility = View.GONE
+            }
             ACTION_UPDATE -> {
                 val name = intent.getStringExtra(EXTRA_NAME).orEmpty()
                 val meta = intent.getStringExtra(EXTRA_META).orEmpty()
@@ -170,7 +260,13 @@ class CallOverlayService : Service() {
                 metaText = meta
                 // 页面在后台冻结时它对时长的认知会滞后；每次更新顺带校准基准，
                 // 保证「通话记录里的时长」与浮窗显示的是同一个数。
-                if (intent.hasExtra(EXTRA_ELAPSED)) setElapsedBase(intent.getIntExtra(EXTRA_ELAPSED, 0))
+                // 只在「网页给的值更大」时才校准基准。
+                // 无条件覆盖会有个坑：页面在后台被系统冻结时，它报上来的秒数会停在旧值，
+                // 每 10 秒一次的回灌于是把浮窗时间往回拽——用户看到的就是时长来回跳。
+                if (intent.hasExtra(EXTRA_ELAPSED)) {
+                    val reported = intent.getIntExtra(EXTRA_ELAPSED, 0)
+                    if (reported > currentElapsed()) setElapsedBase(reported)
+                }
                 if (avatar != avatarUrl) {
                     avatarUrl = avatar
                     refreshAvatarAsync()
@@ -204,6 +300,7 @@ class CallOverlayService : Service() {
     private fun teardown() {
         stopped = true
         running = false
+        if (liveInstance === this) liveInstance = null
         heartbeat?.interrupt()
         heartbeat = null
         removeReplyBar()
@@ -281,6 +378,9 @@ class CallOverlayService : Service() {
     /** 独立的快捷回复条（另一个 WindowManager 窗口，不与小窗共用） */
     private var replyWindow: View? = null
     private var replyInput: EditText? = null
+    /** 条身与发送键：换主题时用它俩就地重绘，不必重开通话 */
+    private var replyBar: LinearLayout? = null
+    private var replySend: Button? = null
     /** 回复条自己的位置（可拖动），与通话小窗各记各的 */
     private var replyBarX = 0
     private var replyBarY = 0
@@ -375,6 +475,7 @@ class CallOverlayService : Service() {
             }
             renderOverlay()
             refreshAvatarAsync()
+            rootView?.visibility = if (visible) View.VISIBLE else View.GONE
         }
         updateNotification()
     }
@@ -651,6 +752,8 @@ class CallOverlayService : Service() {
         replyBarX = prefs.getInt("reply_x", 0)
         replyBarY = prefs.getInt("reply_y", screenH - barHeight - dp(90))
 
+        val theme = ReplyTheme.of(currentTheme(this))
+
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -659,8 +762,6 @@ class CallOverlayService : Service() {
         }
         replyInput = EditText(this).apply {
             hint = "说点什么…"
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#8A93A6"))
             textSize = 14f
             maxLines = 1
             background = null
@@ -675,18 +776,23 @@ class CallOverlayService : Service() {
         val send = Button(this).apply {
             text = "发送"
             textSize = 13f
-            setTextColor(Color.WHITE)
-            background = GradientDrawable().apply {
-                cornerRadius = dp(8).toFloat()
-                setColor(Color.parseColor("#3B82F6"))
-            }
             setPadding(dp(14), dp(6), dp(14), dp(6))
             setOnClickListener { submitReply() }
+        }
+        // 「回到通话」：长按弹出输入条后想直接回全屏通话走这里，
+        // 不必先收起再点小窗（少一步，也不容易点错成拖动）。
+        val restore = Button(this).apply {
+            text = "回到通话"
+            textSize = 13f
+            background = null
+            setOnClickListener {
+                removeReplyBar()
+                bringAppToFront()
+            }
         }
         val close = Button(this).apply {
             text = "收起"
             textSize = 13f
-            setTextColor(Color.parseColor("#C9D1E0"))
             background = null
             setOnClickListener { removeReplyBar() }
         }
@@ -695,10 +801,17 @@ class CallOverlayService : Service() {
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
         ))
+        bar.addView(restore, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
         bar.addView(close, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
         ))
+        replyBar = bar
+        replySend = send
+        paintReplyTheme(theme)
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -777,7 +890,32 @@ class CallOverlayService : Service() {
         val view = replyWindow ?: return
         replyWindow = null
         replyInput = null
+        replyBar = null
+        replySend = null
         main.post { runCatching { windowManager.removeView(view) } }
+    }
+
+    /** 给回复条刷上主题色。换主题时也会调它，所以分出来单独一个方法。 */
+    private fun paintReplyTheme(theme: ReplyTheme) {
+        val bar = replyBar ?: return
+        bar.setBackgroundColor(theme.bar)
+        replyInput?.setTextColor(theme.text)
+        replyInput?.setHintTextColor(theme.hint)
+        replySend?.setTextColor(Color.WHITE)
+        replySend?.background = GradientDrawable().apply {
+            cornerRadius = dp(8).toFloat()
+            setColor(theme.accent)
+        }
+        // 「回到通话」「收起」在布局里是第 3、4 个子控件（前两个是输入框和发送）
+        for (index in 2 until bar.childCount) {
+            (bar.getChildAt(index) as? Button)?.setTextColor(theme.muted)
+        }
+    }
+
+    /** 主题变了：已弹出的回复条就地重绘（网页侧切完主题立刻能看到效果）。 */
+    private fun applyTheme(key: String) {
+        val theme = ReplyTheme.of(key)
+        main.post { paintReplyTheme(theme) }
     }
 
     private fun showIme(target: EditText?) {

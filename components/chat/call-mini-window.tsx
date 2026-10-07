@@ -36,9 +36,13 @@ type CallMiniWindowProps = {
     ariaLabel: string;
     /** 点一下小窗（没有拖动）时回到全屏通话 */
     onRestore?: () => void;
+    /** 排队待发的消息条数。>0 时小窗上挂一个小角标——用户从这条回复条
+     *  发了话、角色正在说，消息会排到它说完再发，得让人看得见没丢。 */
+    pendingCount?: number;
     /** 长按小窗弹出的快捷回复：与通话界面里的输入走同一条通路。
+     *  返回 false 表示没被受理（如排队已满），此时保留输入内容不丢；
      *  不传则不弹输入条（长按等同轻点，保持旧行为）。 */
-    onReply?: (text: string) => void;
+    onReply?: (text: string) => boolean | void;
 };
 
 const MIN_W = 88;
@@ -118,7 +122,7 @@ function readStoredGeometry(): Geometry | null {
     }
 }
 
-export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, onReply }: CallMiniWindowProps) {
+export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, onReply, pendingCount = 0 }: CallMiniWindowProps) {
     const [geo, setGeo] = useState<Geometry>(() => defaultGeometry());
     const [mounted, setMounted] = useState(false);
     // 长按弹出的快捷回复条。原生浮窗那边是另开一个独立窗口，网页里没有窗口
@@ -271,10 +275,13 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
 
     const submitReply = useCallback(() => {
         const text = replyText.trim();
+        if (!text) return;
+        // 与通话界面里手动输入完全同一条通路：会落聊天记录、触发角色回复与 TTS。
+        // 受理不了（排队已满）时保留内容并留在输入条上，别让用户以为发出去了。
+        const accepted = onReply?.(text);
+        if (accepted === false) return;
         setShowReply(false);
         setReplyText("");
-        // 与通话界面里手动输入完全同一条通路：会落聊天记录、触发角色回复与 TTS
-        if (text) onReply?.(text);
     }, [onReply, replyText]);
 
     if (!mounted) return null;
@@ -348,6 +355,20 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
                     </span>
                 ))}
             </div>
+            {/* 待发送角标：有排队消息时显示，点开小窗可按提示查看 */}
+            {pendingCount > 0 && (
+                <span
+                    style={{
+                        position: "absolute", top: 4, left: 4, zIndex: 4,
+                        padding: "2px 7px", borderRadius: 999,
+                        background: "rgba(20,20,26,0.82)", backdropFilter: "blur(6px)",
+                        color: "#fff", fontSize: 10, lineHeight: 1.4,
+                        whiteSpace: "nowrap", pointerEvents: "none",
+                    }}
+                >
+                    待发 {pendingCount}
+                </span>
+            )}
             {/* 右下角缩放柄：拖它改小窗大小 */}
             <span
                 data-call-mini-resize=""

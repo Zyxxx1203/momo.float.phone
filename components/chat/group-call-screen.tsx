@@ -24,6 +24,7 @@ import { CallMiniWindow } from "./call-mini-window";
 import { useShellCallOverlay } from "./use-shell-call-overlay";
 import { CallAutoChatControl } from "./call-auto-chat-control";
 import { useCallAutoChat } from "./use-call-auto-chat";
+import { useCallReplyQueue } from "./use-call-reply-queue";
 import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
@@ -458,6 +459,15 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd, callTypeLabel]);
 
+    // 待发送队列：角色说话/思考时发来的消息先排队，空闲后自动补发，
+    // 不再像从前那样忙就直接丢掉（浮窗回复条尤其容易空发）。
+    const replyQueue = useCallReplyQueue({
+        callState,
+        callStateRef: stateRef,
+        runTurn: (text) => { void runConversationTurn(text); },
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+    });
+
     // 自动搭话：没人出声时让群里随机某位主动找话说（与语音/视频通话同一套配置）。
     // 放在 runConversationTurn / handleHangup 之后，避免 const 的暂时性死区。
     const autoChat = useCallAutoChat({
@@ -498,10 +508,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         name: `群${callTypeLabel}`,
         avatar: voiceBgResolved || resolvedBgs[characters[0]?.id || ""] || characters[0]?.avatar || null,
         getDuration: () => callDurationRef.current,
-        onReply: (text) => {
-            // 与界面里手动输入走同一条通路：会落聊天记录、触发角色回复与 TTS
-            if (stateRef.current === "IDLE") void runConversationTurn(text);
-        },
+        // 浮窗里发来的消息一律进队列：忙时排队、空闲时自动补发，不再静默丢弃
+        onReply: (text) => { replyQueue.submit(text); },
         onHangup: () => handleHangup(),
         onRestore,
         onTick: (seconds) => {
@@ -731,7 +739,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 ariaLabel={`返回群${callTypeLabel}`}
                 onRestore={onRestore}
                 // 长按小窗就地回复，不必先跳回通话界面
-                onReply={(text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); }}
+                onReply={(text) => replyQueue.submit(text) !== "rejected"}
+                pendingCount={replyQueue.pending}
             />
         );
     }
@@ -746,6 +755,19 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         return (
             <div className="gcall-video-root voicecall-controls call-keyboard-shift" style={keyboardOffsetStyle}>
                 <CallVolumeControl />
+                {/* 待发送提示：群里说完这轮就会自动发出去，避免以为消息丢了 */}
+                {replyQueue.pending > 0 && (
+                    <div
+                        style={{
+                            position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+                            zIndex: 45, padding: "4px 12px", borderRadius: 999,
+                            background: "rgba(20,20,26,0.8)", backdropFilter: "blur(8px)",
+                            fontSize: 11.5, color: "#fff", whiteSpace: "nowrap",
+                        }}
+                    >
+                        对方说完就发 · 还有 {replyQueue.pending} 条
+                    </div>
+                )}
                 {/* 自动搭话：没人出声时让群里随机某位主动找话说 */}
                 {callState !== "CONNECTING" && callState !== "ENDED" && (
                     <CallAutoChatControl config={autoChat.config} onUpdate={autoChat.update} />
@@ -863,6 +885,20 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             <div className="call-overlay" {...(voiceBgResolved ? { "data-has-image": "" } : {})} />
 
             <CallVolumeControl />
+
+            {/* 待发送提示：群里说完这轮就会自动发出去，避免以为消息丢了 */}
+            {replyQueue.pending > 0 && (
+                <div
+                    style={{
+                        position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+                        zIndex: 45, padding: "4px 12px", borderRadius: 999,
+                        background: "rgba(20,20,26,0.8)", backdropFilter: "blur(8px)",
+                        fontSize: 11.5, color: "#fff", whiteSpace: "nowrap",
+                    }}
+                >
+                    对方说完就发 · 还有 {replyQueue.pending} 条
+                </div>
+            )}
 
             {/* 自动搭话：没人出声时让群里随机某位主动找话说 */}
             {callState !== "CONNECTING" && callState !== "ENDED" && (

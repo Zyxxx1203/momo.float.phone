@@ -27,6 +27,7 @@ import { CallMiniWindow } from "./call-mini-window";
 import { useShellCallOverlay } from "./use-shell-call-overlay";
 import { CallAutoChatControl } from "./call-auto-chat-control";
 import { useCallAutoChat } from "./use-call-auto-chat";
+import { useCallReplyQueue } from "./use-call-reply-queue";
 import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
@@ -708,7 +709,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 ariaLabel={`返回与${character.name}的视频通话`}
                 onRestore={onRestore}
                 // 长按小窗就地回复，不必先跳回通话界面
-                onReply={(text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); }}
+                onReply={(text) => replyQueue.submit(text) !== "rejected"}
+                pendingCount={replyQueue.pending}
             />
         );
     }

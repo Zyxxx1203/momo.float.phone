@@ -27,6 +27,7 @@ import { CallMiniWindow } from "./call-mini-window";
 import { type CallAutoChatConfig, MAX_TURNS_LIMIT, MIN_INTERVAL_SECONDS, loadCallAutoChatConfig, randomAutoChatDelaySeconds, saveCallAutoChatConfig } from "@/lib/call-auto-chat";
 import { isShellEnvironment, stopShellCallOverlay } from "@/lib/shell-call-overlay";
 import { useShellCallOverlay } from "./use-shell-call-overlay";
+import { useCallReplyQueue } from "./use-call-reply-queue";
 
 // ── Types ───────────────────────────────────────────
 
@@ -773,6 +774,18 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // 保持 ref 指向最新的 handleHangup（原生浮窗的挂断事件要调到它）
     useEffect(() => { hangupRef.current = handleHangup; }, [handleHangup]);
 
+    // ── 待发送队列 ──
+    //
+    // 角色正在说话/思考时不能立刻发新消息（会打断当前一轮）。从前是「忙就丢掉」，
+    // 从浮窗回复条发消息时因此常常空发——字收了、条收了，消息却没了。
+    // 改为排队：空闲了自动补发。必须放在 runConversationTurn 之后。
+    const replyQueue = useCallReplyQueue({
+        callState,
+        callStateRef: stateRef,
+        runTurn: (text) => { void runConversationTurn(text); },
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+    });
+
     // ── 接入原生浮窗 ──
     //
     // 必须放在 handleHangup / runConversationTurn 定义之后：下面这个钩子的
@@ -788,7 +801,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             callDurationRef.current,
             callStartRef.current ? Math.floor((Date.now() - callStartRef.current) / 1000) : 0,
         ),
-        onReply: (text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); },
+        // 浮窗里发来的消息一律进队列：忙时排队、空闲时自动补发，不再静默丢弃
+        onReply: (text) => { replyQueue.submit(text); },
         onHangup: () => hangupRef.current(),
         onRestore,
         onTick: (seconds) => {
@@ -872,7 +886,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 ariaLabel={`返回与${character.name}的语音通话`}
                 onRestore={onRestore}
                 // 长按小窗就地回复，不必先跳回通话界面
-                onReply={(text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); }}
+                onReply={(text) => replyQueue.submit(text) !== "rejected"}
+                pendingCount={replyQueue.pending}
             />
         );
     }
@@ -889,6 +904,20 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             />
 
             <CallVolumeControl />
+
+            {/* 待发送提示：缩成小窗/全屏都看得见，避免以为消息丢了 */}
+            {replyQueue.pending > 0 && (
+                <div
+                    style={{
+                        position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+                        zIndex: 45, padding: "4px 12px", borderRadius: 999,
+                        background: "rgba(20,20,26,0.8)", backdropFilter: "blur(8px)",
+                        fontSize: 11.5, color: "#fff", whiteSpace: "nowrap",
+                    }}
+                >
+                    对方说完就发 · 还有 {replyQueue.pending} 条
+                </div>
+            )}
 
             {/* 浮窗权限未开：切出去时给一条引导（只在壳里、且确实触发过时出现） */}
             {shellOverlay.showPermissionHint && isShellEnvironment() && (
@@ -1113,6 +1142,19 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     className="voicecall-subtitle-mask flex-1 min-h-0 overflow-auto px-5 py-[10px] flex flex-col gap-2 relative"
                     {...(inputMode === "text" && callState !== "CONNECTING" && callState !== "ENDED" ? { "data-text-input": "" } : {})}
                 >
+                    {/* 排队中的消息：角色说完这轮就会自动发出去，让用户知道没丢 */}
+                    {replyQueue.pending > 0 && (
+                        <div
+                            style={{
+                                alignSelf: "center", flexShrink: 0,
+                                padding: "4px 12px", borderRadius: 999,
+                                background: "rgba(255,255,255,0.16)", backdropFilter: "blur(8px)",
+                                fontSize: 11.5, color: "rgba(255,255,255,0.92)",
+                            }}
+                        >
+                            对方说完就发 · 还有 {replyQueue.pending} 条
+                        </div>
+                    )}
                     {subtitles.map((sub) => (
                         <div
                             key={sub.id}

@@ -74,6 +74,16 @@ data class ReplyTheme(
     val muted: Int,
 ) {
     companion object {
+        /**
+         * 兜底预设键。
+         *
+         * 这里单独定义一份、而不是用 CallOverlayService.Companion 里的同名常量：
+         * data class 的伴生对象与外层 Service 的伴生对象是两个作用域，前者看不到后者，
+         * 直接引用会编译不过（Unresolved reference）。ReplyTheme 保持自成一体，
+         * 也不该反过来依赖 Service。
+         */
+        private const val THEME_DEFAULT = "dark"
+
         fun build(key: String, label: String, bar: Long, text: Long, hint: Long, accent: Long, sendText: Long, muted: Long) =
             ReplyTheme(key, label, bar.toInt(), text.toInt(), hint.toInt(), accent.toInt(), sendText.toInt(), muted.toInt())
 

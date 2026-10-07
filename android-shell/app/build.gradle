@@ -41,6 +41,14 @@ android {
             minifyEnabled false
             if (ksFile) signingConfig signingConfigs.release
         }
+        debug {
+            // 有固定签名时 debug 也用同一把钥匙。
+            // CI 每次构建都是全新容器，自动生成的 debug 密钥每次都不同——
+            // 签名一变就只能卸载重装，App 数据（WebView 沙盒里的聊天记录、
+            // 角色卡）会一起丢。统一签名后 debug / release 两个包可以互相
+            // 覆盖安装，选哪个都不会再触发「应用未安装」。
+            if (ksFile) signingConfig signingConfigs.release
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

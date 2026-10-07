@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type CSSProperties } from "react";
 import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
@@ -24,6 +24,7 @@ import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
+import { type CallAutoChatConfig, MAX_TURNS_LIMIT, MIN_INTERVAL_SECONDS, loadCallAutoChatConfig, randomAutoChatDelaySeconds, saveCallAutoChatConfig } from "@/lib/call-auto-chat";
 
 // ── Types ───────────────────────────────────────────
 
@@ -53,6 +54,30 @@ type VoiceCallScreenProps = {
     onMinimize?: () => void;
     /** 点击悬浮窗：请求恢复为全屏通话界面 */
     onRestore?: () => void;
+};
+
+/** 自动搭话设置里的数字输入框样式（深底浅字，随面板走） */
+const AUTO_CHAT_INPUT_STYLE: CSSProperties = {
+    width: 66,
+    padding: "4px 6px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.22)",
+    background: "rgba(255,255,255,0.1)",
+    color: "#fff",
+    fontSize: 12,
+    textAlign: "center",
+};
+
+/** 自动搭话设置面板的容器定位（通话界面左上角，返回键下方） */
+const AUTO_CHAT_BOX_STYLE: CSSProperties = {
+    position: "absolute",
+    top: 56,
+    left: 12,
+    zIndex: 30,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 6,
 };
 
 function stripBilingualForSpeech(text: string): string {
@@ -88,6 +113,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const [typedText, setTypedText] = useState("");
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
     const [showSttWarning, setShowSttWarning] = useState(false);
+    // 自动搭话：进通话时读一次配置；改动即时存盘并热生效
+    const [autoChatConfig, setAutoChatConfig] = useState<CallAutoChatConfig>(() => loadCallAutoChatConfig());
+    const [showAutoChatPanel, setShowAutoChatPanel] = useState(false);
 
     const sttRef = useRef<STTSession | null>(null);
     const audioAbortRef = useRef<(() => void) | null>(null);
@@ -98,6 +126,14 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const stateRef = useRef<string>("CONNECTING");
     const interimTextRef = useRef<string>("");  // ref 版本，闭包安全
     const sttWarningShownRef = useRef(false);
+    // 自动搭话：下一次可开口的时刻（毫秒时间戳）
+    const autoChatDeadlineRef = useRef<number>(0);
+    // 本次通话已自动搭话条数（用户一开口清零）
+    const autoTurnsRef = useRef(0);
+    // 角色连着几轮没说出内容：等待时长按此翻倍，避免空转连发
+    const emptyAutoTurnsRef = useRef(0);
+    // 配置的 ref 快照：心跳里读最新值，不必因设置变化重建定时器
+    const autoChatConfigRef = useRef<CallAutoChatConfig>(autoChatConfig);
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
@@ -344,9 +380,31 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         return { cleanParts, stateValues };
     }, [session.id, session.contactId]);
 
+    // ── 自动搭话：安排下一次主动开口 ──────────────────
+    //
+    // 每次角色说完（或空转一趟）都调一次：按配置在 [min, max] 里随机取间隔，
+    // 算出「下一次可开口的时刻」。真人是忽快忽慢的，固定节拍像定时器。
+    // 空转那几轮按翻倍惩罚（最多 4 倍），别让它在没人听时连珠炮。
+    const scheduleNextAutoChat = useCallback(() => {
+        const config = autoChatConfigRef.current;
+        if (!config.enabled) {
+            autoChatDeadlineRef.current = 0;
+            return;
+        }
+        const backoff = 1 + Math.min(emptyAutoTurnsRef.current, 3);
+        autoChatDeadlineRef.current = Date.now() + randomAutoChatDelaySeconds(config) * backoff * 1000;
+    }, []);
+
     // ── Full conversation turn ──────────────────────
 
     const runConversationTurn = useCallback(async (userText?: string) => {
+        // 用户开口：自动搭话重新计数（上限按「你开口后」重新算）
+        if (userText) {
+            autoTurnsRef.current = 0;
+            emptyAutoTurnsRef.current = 0;
+            autoChatDeadlineRef.current = 0;
+        }
+
         // 1. Save user message (skip for initial greeting)
         if (userText) {
             const userMsg = pushChatMessage({
@@ -379,6 +437,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             const speechText = stripBilingualForSpeech(displayText);
 
             if (!displayText) {
+                // 这轮角色没说出内容：下次等更久，避免空转连发
+                emptyAutoTurnsRef.current += 1;
+                scheduleNextAutoChat();
                 setCallState("IDLE");
                 return;
             }
@@ -387,13 +448,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             const subtitleId = `ai-${Date.now()}`;
             setSubtitles(prev => [...prev, { id: subtitleId, role: "assistant", text: displayText }]);
 
-            // 缩小为悬浮窗期间收到的回复：只静默记录文字，不播放语音
-            if (minimizedRef.current) {
-                setCallState("IDLE");
-                return;
-            }
-
-            // 6. TTS
+            // 6. TTS —— 缩成悬浮窗也照常播。
+            // 原先这里遇到小窗直接静默返回，于是「正在生成时退出全屏」那句话
+            // 永远没声音。用户要的是通话继续，语音就该继续。
             setCallState("AI_SPEAKING");
 
             const voiceConfig = resolveVoiceConfig(session.contactId);
@@ -414,6 +471,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             }
 
             if (stateRef.current !== "ENDED") {
+                emptyAutoTurnsRef.current = 0;
+                scheduleNextAutoChat();
                 setCallState("IDLE");
             }
         } catch (error: any) {
@@ -424,10 +483,44 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     role: "assistant",
                     text: `⚠️ ${error?.message || "发送失败"}`,
                 }]);
+                scheduleNextAutoChat();
                 setCallState("IDLE");
             }
         }
-    }, [session, processAIResponse, playCallAudio]);
+    }, [session, processAIResponse, playCallAudio, scheduleNextAutoChat]);
+
+    // ── 自动搭话：心跳 ───────────────────────────────
+    //
+    // 每秒看一眼：通话处于 IDLE（谁也没在说）、没超上限、已过随机等待点，
+    // 就让角色主动开口。缩成小窗也照常触发——用户要的就是「挂着也一直聊」，
+    // 只是触发前会停掉在听的识别，免得把角色自己的声音录进去。
+    useEffect(() => {
+        autoChatConfigRef.current = autoChatConfig;
+        if (!autoChatConfig.enabled) {
+            autoChatDeadlineRef.current = 0;
+            return;
+        }
+        // 刚开启（或刚进通话）：从当下起算一个随机间隔
+        if (!autoChatDeadlineRef.current) {
+            autoChatDeadlineRef.current = Date.now() + randomAutoChatDelaySeconds(autoChatConfig) * 1000;
+        }
+        const timer = window.setInterval(() => {
+            if (stateRef.current !== "IDLE") return;
+            const limit = autoChatConfigRef.current.maxTurns;
+            if (limit > 0 && autoTurnsRef.current >= limit) return;
+            const deadline = autoChatDeadlineRef.current;
+            if (!deadline || Date.now() < deadline) return;
+            autoTurnsRef.current += 1;
+            autoChatDeadlineRef.current = 0;
+            if (sttRef.current) {
+                sttRef.current.abort();
+                sttRef.current = null;
+            }
+            setInterimText("");
+            void runConversationTurn();
+        }, 1000);
+        return () => window.clearInterval(timer);
+    }, [autoChatConfig, runConversationTurn]);
 
     // ── Auto-listen: 进入 IDLE 自动开始监听 ────────
 
@@ -671,6 +764,120 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                         <path d="M15 18l-6-6 6-6" />
                     </svg>
                 </button>
+            )}
+
+            {/* 自动搭话：我不出声时让角色主动找话说（煲电话粥用） */}
+            {callState !== "CONNECTING" && callState !== "ENDED" && (
+                <div style={AUTO_CHAT_BOX_STYLE}>
+                    <button
+                        type="button"
+                        onClick={() => setShowAutoChatPanel(v => !v)}
+                        aria-label="自动搭话设置"
+                        title={
+                            autoChatConfig.enabled
+                                ? `自动搭话：静默 ${autoChatConfig.minSeconds}~${autoChatConfig.maxSeconds} 秒随机开口`
+                                : "自动搭话：已关闭"
+                        }
+                        style={{
+                            display: "flex", alignItems: "center", gap: 5,
+                            padding: "6px 10px", borderRadius: 999, border: "none",
+                            background: autoChatConfig.enabled ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.18)",
+                            color: autoChatConfig.enabled ? "#1b1b22" : "#fff",
+                            fontSize: 12, fontWeight: 600, cursor: "pointer",
+                            backdropFilter: "blur(8px)",
+                        }}
+                    >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                        </svg>
+                        {autoChatConfig.enabled
+                            ? `自动搭话 ${autoChatConfig.minSeconds}~${autoChatConfig.maxSeconds}s`
+                            : "自动搭话 关"}
+                    </button>
+
+                    {showAutoChatPanel && (
+                        <div
+                            style={{
+                                display: "flex", flexDirection: "column", gap: 9,
+                                padding: "11px 12px", borderRadius: 14,
+                                background: "rgba(20,20,26,0.82)", backdropFilter: "blur(10px)",
+                                color: "#fff", fontSize: 12, minWidth: 196,
+                                boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                            }}
+                        >
+                            <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <span style={{ fontWeight: 600 }}>自动搭话</span>
+                                <input
+                                    type="checkbox"
+                                    checked={autoChatConfig.enabled}
+                                    onChange={(e) => {
+                                        const next = saveCallAutoChatConfig({ ...autoChatConfig, enabled: e.target.checked });
+                                        setAutoChatConfig(next);
+                                        autoTurnsRef.current = 0;
+                                        emptyAutoTurnsRef.current = 0;
+                                        autoChatDeadlineRef.current = 0;
+                                    }}
+                                    style={{ width: 18, height: 18, accentColor: "#fff" }}
+                                />
+                            </label>
+
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <span>静默下限</span>
+                                <input
+                                    type="number"
+                                    min={MIN_INTERVAL_SECONDS}
+                                    defaultValue={autoChatConfig.minSeconds}
+                                    title={`最小 ${MIN_INTERVAL_SECONDS} 秒`}
+                                    onBlur={(e) => {
+                                        const next = saveCallAutoChatConfig({ ...autoChatConfig, minSeconds: Number(e.target.value) });
+                                        setAutoChatConfig(next);
+                                        e.target.value = String(next.minSeconds);
+                                        autoChatDeadlineRef.current = 0;
+                                    }}
+                                    style={AUTO_CHAT_INPUT_STYLE}
+                                />
+                            </div>
+
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <span>静默上限</span>
+                                <input
+                                    type="number"
+                                    min={autoChatConfig.minSeconds}
+                                    defaultValue={autoChatConfig.maxSeconds}
+                                    title="不小于静默下限"
+                                    onBlur={(e) => {
+                                        const next = saveCallAutoChatConfig({ ...autoChatConfig, maxSeconds: Number(e.target.value) });
+                                        setAutoChatConfig(next);
+                                        e.target.value = String(next.maxSeconds);
+                                        autoChatDeadlineRef.current = 0;
+                                    }}
+                                    style={AUTO_CHAT_INPUT_STYLE}
+                                />
+                            </div>
+
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <span>条数上限</span>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    max={MAX_TURNS_LIMIT}
+                                    defaultValue={autoChatConfig.maxTurns}
+                                    title="0 = 不限"
+                                    onBlur={(e) => {
+                                        const next = saveCallAutoChatConfig({ ...autoChatConfig, maxTurns: Number(e.target.value) });
+                                        setAutoChatConfig(next);
+                                        e.target.value = String(next.maxTurns);
+                                    }}
+                                    style={AUTO_CHAT_INPUT_STYLE}
+                                />
+                            </div>
+
+                            <div style={{ opacity: 0.62, lineHeight: 1.5 }}>
+                                静默时长在上下限之间随机取值；条数上限填 0 = 不限。你开口后重新计数。
+                            </div>
+                        </div>
+                    )}
+                </div>
             )}
 
             {/* Content wrapper — force white text so themes don't override call UI */}

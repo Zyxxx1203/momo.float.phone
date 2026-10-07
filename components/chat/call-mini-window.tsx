@@ -19,7 +19,10 @@ type CallMiniWindowProps = {
     /** 小窗背景图（角色头像 / 通话背景），没有就用纯色底 */
     imageUrl?: string | null;
     title: string;
-    subtitle?: string;
+    /** 底部信息行，自上而下逐行显示（如时长、通话类型）。
+     *  拆成数组而不是拼成一句：窗口可以缩到 88px 宽，拼成一句必被截断，
+     *  拆行后每行各自省略，信息不会丢。 */
+    meta?: string[];
     ariaLabel: string;
     /** 点一下小窗（没有拖动）时回到全屏通话 */
     onRestore?: () => void;
@@ -88,7 +91,7 @@ function readStoredGeometry(): Geometry | null {
     }
 }
 
-export function CallMiniWindow({ imageUrl, title, subtitle, ariaLabel, onRestore }: CallMiniWindowProps) {
+export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore }: CallMiniWindowProps) {
     const [geo, setGeo] = useState<Geometry>(() => defaultGeometry());
     const [mounted, setMounted] = useState(false);
     const geoRef = useRef(geo);
@@ -234,19 +237,30 @@ export function CallMiniWindow({ imageUrl, title, subtitle, ariaLabel, onRestore
                 className="call-mini-window-overlay"
                 style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(0,0,0,0.05) 30%, rgba(0,0,0,0.62) 100%)", pointerEvents: "none" }}
             />
-            <span
-                className="call-mini-window-name"
-                style={{ position: "absolute", left: 0, right: 0, bottom: subtitle ? 22 : 8, textAlign: "center", fontSize: 12, fontWeight: 600, color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.6)", pointerEvents: "none", padding: "0 6px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+            {/* 底部信息栈：名字 + 逐行 meta，从下往上贴着窗口底部排。
+                左右留 10px，避免最下面那行跑到右下角缩放柄底下。 */}
+            <div
+                style={{
+                    position: "absolute", left: 0, right: 0, bottom: 0,
+                    display: "flex", flexDirection: "column", alignItems: "center",
+                    gap: 1, padding: "0 10px 7px", pointerEvents: "none",
+                }}
             >
-                {title}
-            </span>
-            {subtitle ? (
                 <span
-                    style={{ position: "absolute", left: 0, right: 0, bottom: 7, textAlign: "center", fontSize: 10.5, lineHeight: 1.1, color: "rgba(255,255,255,0.86)", textShadow: "0 1px 4px rgba(0,0,0,0.6)", pointerEvents: "none" }}
+                    className="call-mini-window-name"
+                    style={{ maxWidth: "100%", fontSize: 12, fontWeight: 600, lineHeight: 1.25, color: "#fff", textShadow: "0 1px 4px rgba(0,0,0,0.6)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
                 >
-                    {subtitle}
+                    {title}
                 </span>
-            ) : null}
+                {(meta ?? []).map((line, index) => (
+                    <span
+                        key={`${index}-${line}`}
+                        style={{ maxWidth: "100%", fontSize: 10.5, lineHeight: 1.25, color: "rgba(255,255,255,0.88)", textShadow: "0 1px 4px rgba(0,0,0,0.6)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                    >
+                        {line}
+                    </span>
+                ))}
+            </div>
             {/* 右下角缩放柄：拖它改小窗大小 */}
             <span
                 data-call-mini-resize=""

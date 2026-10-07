@@ -638,7 +638,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             <CallMiniWindow
                 imageUrl={bgImageResolved || character.avatar || null}
                 title={character.name}
-                subtitle="视频通话"
+                meta={["视频通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的视频通话`}
                 onRestore={onRestore}
             />

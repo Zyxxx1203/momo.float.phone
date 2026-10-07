@@ -732,7 +732,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             <CallMiniWindow
                 imageUrl={bgImageResolved || character.avatar || null}
                 title={character.name}
-                subtitle="语音通话"
+                meta={["语音通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的语音通话`}
                 onRestore={onRestore}
             />

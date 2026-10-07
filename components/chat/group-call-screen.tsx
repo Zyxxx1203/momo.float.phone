@@ -664,7 +664,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             <CallMiniWindow
                 imageUrl={voiceBgResolved || resolvedBgs[characters[0]?.id || ""] || characters[0]?.avatar || null}
                 title={`群${callTypeLabel}`}
-                subtitle={`${characters.length + 1}人`}
+                meta={[`${characters.length + 1}人`, formatTime(callDuration)]}
                 ariaLabel={`返回群${callTypeLabel}`}
                 onRestore={onRestore}
             />

@@ -69,16 +69,20 @@ const AUTO_CHAT_INPUT_STYLE: CSSProperties = {
     textAlign: "center",
 };
 
-/** 自动搭话设置面板的容器定位（通话界面左上角，返回键下方） */
-const AUTO_CHAT_BOX_STYLE: CSSProperties = {
+/** 自动搭话按钮的默认落点（可拖动，拖动后位置记在本地）。
+ *  默认靠右上：原先放左上时和「缩小通话」返回键叠在一起，返回键被挡住点不到。 */
+const AUTO_CHAT_DEFAULT_POS: { x: number | null; y: number } = { x: null, y: 104 };
+const AUTO_CHAT_POS_KEY = "call-auto-chat-btn-pos-v1";
+
+/** 自动搭话按钮/面板的容器基础样式（具体位置由拖动状态决定） */
+const AUTO_CHAT_BOX_BASE: CSSProperties = {
     position: "absolute",
-    top: 56,
-    left: 12,
     zIndex: 30,
     display: "flex",
     flexDirection: "column",
-    alignItems: "flex-start",
+    alignItems: "flex-end",
     gap: 6,
+    touchAction: "none",
 };
 
 function stripBilingualForSpeech(text: string): string {
@@ -119,6 +123,21 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const [showAutoChatPanel, setShowAutoChatPanel] = useState(false);
     // 安卓壳里：切到别的 App 时用原生浮窗顶上（浮窗权限未开时给一条引导）
     const [showOverlayHint, setShowOverlayHint] = useState(false);
+    // 自动搭话按钮的位置（可拖动，拖动后记在本地，下次通话沿用）
+    const [autoChatPos, setAutoChatPos] = useState<{ x: number | null; y: number }>(() => {
+        if (typeof window === "undefined") return { ...AUTO_CHAT_DEFAULT_POS };
+        try {
+            const raw = window.localStorage.getItem(AUTO_CHAT_POS_KEY);
+            if (!raw) return { ...AUTO_CHAT_DEFAULT_POS };
+            const parsed = JSON.parse(raw) as { x?: number | null; y?: number };
+            return {
+                x: typeof parsed.x === "number" ? parsed.x : null,
+                y: typeof parsed.y === "number" ? parsed.y : AUTO_CHAT_DEFAULT_POS.y,
+            };
+        } catch {
+            return { ...AUTO_CHAT_DEFAULT_POS };
+        }
+    });
 
     const sttRef = useRef<STTSession | null>(null);
     const audioAbortRef = useRef<(() => void) | null>(null);
@@ -142,6 +161,12 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // handleHangup 依赖 callDuration（每秒都变），直接进 effect 依赖会让监听器
     // 每秒重装一次；用 ref 转发，订阅只建立一次。
     const hangupRef = useRef<() => void>(() => {});
+    // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
+    const callDurationRef = useRef(0);
+    useEffect(() => { callDurationRef.current = callDuration; }, [callDuration]);
+    // 自动搭话按钮的拖动状态
+    const autoChatDragRef = useRef<{ id: number; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
+    const autoChatBoxRef = useRef<HTMLDivElement | null>(null);
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
@@ -800,9 +825,13 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     return;
                 }
                 case "tick": {
-                    // 原生计时接管：页面在后台被冻结时，以原生的秒数为准
-                    if (typeof event.seconds === "number" && event.seconds >= 0) {
+                    // 原生计时校准：只前进、不后退。
+                    // 页面在后台被冻结时网页计时会落后，以原生为准把基准推上去；
+                    // 反过来（原生更小）一律忽略，否则时长来回跳，
+                    // 挂断时写进聊天记录的时长也跟着乱。
+                    if (typeof event.seconds === "number" && event.seconds > callDurationRef.current) {
                         callStartRef.current = Date.now() - event.seconds * 1000;
+                        callDurationRef.current = event.seconds;
                         setCallDuration(event.seconds);
                     }
                     return;
@@ -822,6 +851,23 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // 保持 ref 指向最新的 handleHangup
     useEffect(() => { hangupRef.current = handleHangup; }, [handleHangup]);
 
+    // 时长校准：页面在后台且浮窗挂着时，定期把网页侧时长回灌给原生。
+    // 单独一个 effect 而不是并进启动 effect——callDuration 每秒都变，
+    // 一旦进依赖就会让浮窗每秒重建一次。
+    useEffect(() => {
+        if (!shellOverlaySupported || !pageHidden) return;
+        if (callState === "ENDED" || callState === "CONNECTING") return;
+        const timer = window.setInterval(() => {
+            updateShellCallOverlay({
+                name: character.name,
+                avatar: bgImageResolved || character.avatar || null,
+                meta: ["语音通话", "{{time}}"],
+                elapsedSeconds: callDurationRef.current,
+            });
+        }, 10000);
+        return () => window.clearInterval(timer);
+    }, [shellOverlaySupported, pageHidden, callState, character.name, character.avatar, bgImageResolved]);
+
     // 浮窗权限未开时的引导条
     useEffect(() => {
         if (!showOverlayHint) return;
@@ -829,6 +875,55 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         const timer = window.setTimeout(done, 12000);
         return () => window.clearTimeout(timer);
     }, [showOverlayHint]);
+
+    // ── 自动搭话按钮的拖动（指针事件；拖过就不触发开关） ──
+    const handleAutoChatPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        // 点在展开的面板内部（勾选框、数字框）时不拖动
+        if ((event.target as HTMLElement).closest("[data-auto-chat-panel]")) return;
+        const box = autoChatBoxRef.current;
+        if (!box) return;
+        const rect = box.getBoundingClientRect();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        autoChatDragRef.current = {
+            id: event.pointerId,
+            sx: event.clientX,
+            sy: event.clientY,
+            ox: rect.left,
+            oy: rect.top,
+            moved: false,
+        };
+    }, []);
+
+    const handleAutoChatPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        const drag = autoChatDragRef.current;
+        if (!drag || drag.id !== event.pointerId) return;
+        const dx = event.clientX - drag.sx;
+        const dy = event.clientY - drag.sy;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+        if (!drag.moved) return;
+        const width = autoChatBoxRef.current?.offsetWidth ?? 120;
+        const maxX = Math.max(0, window.innerWidth - width);
+        setAutoChatPos({
+            x: Math.min(Math.max(0, drag.ox + dx), maxX),
+            y: Math.max(0, drag.oy + dy),
+        });
+    }, []);
+
+    const handleAutoChatPointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+        const drag = autoChatDragRef.current;
+        if (!drag || drag.id !== event.pointerId) return;
+        autoChatDragRef.current = null;
+        if (!drag.moved) {
+            // 没移动 = 轻点：开合面板
+            setShowAutoChatPanel(v => !v);
+            return;
+        }
+        try {
+            window.localStorage.setItem(AUTO_CHAT_POS_KEY, JSON.stringify(autoChatPos));
+        } catch {
+            /* 存不下就算了，不影响这次拖动 */
+        }
+    }, [autoChatPos]);
 
     // ── Render ──────────────────────────────────────
 
@@ -890,11 +985,22 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
             {/* 自动搭话：我不出声时让角色主动找话说（煲电话粥用） */}
             {callState !== "CONNECTING" && callState !== "ENDED" && (
-                <div style={AUTO_CHAT_BOX_STYLE}>
+                <div
+                    ref={autoChatBoxRef}
+                    style={{
+                        ...AUTO_CHAT_BOX_BASE,
+                        top: autoChatPos.y,
+                        ...(autoChatPos.x == null ? { right: 12 } : { left: autoChatPos.x }),
+                    }}
+                    onPointerDown={handleAutoChatPointerDown}
+                    onPointerMove={handleAutoChatPointerMove}
+                    onPointerUp={handleAutoChatPointerUp}
+                    onPointerCancel={handleAutoChatPointerUp}
+                >
                     <button
                         type="button"
-                        onClick={() => setShowAutoChatPanel(v => !v)}
                         aria-label="自动搭话设置"
+                        title="拖动可移动 · 点一下展开设置"
                         title={
                             autoChatConfig.enabled
                                 ? `自动搭话：静默 ${autoChatConfig.minSeconds}~${autoChatConfig.maxSeconds} 秒随机开口`
@@ -919,6 +1025,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
                     {showAutoChatPanel && (
                         <div
+                            data-auto-chat-panel=""
                             style={{
                                 display: "flex", flexDirection: "column", gap: 9,
                                 padding: "11px 12px", borderRadius: 14,

@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { loadCallOverlayTheme, resolveCallOverlayTheme, subscribeCallOverlayTheme } from "@/lib/call-overlay-theme";
+import { useCallKeyboardOffsetStyle } from "./use-call-keyboard-offset";
 
 type CallMiniWindowProps = {
     /** 小窗背景图（角色头像 / 通话背景），没有就用纯色底 */
@@ -52,8 +53,6 @@ const EDGE = 14;
 const DRAG_SLOP = 5;
 /** 长按判定：按住这么久且没位移 = 弹快捷回复条（与原生浮窗的 480ms 对齐） */
 const LONG_PRESS_MS = 480;
-/** 回复条的最小宽度：小窗最窄只有 88px，塞输入框进去字都看不清 */
-const REPLY_MIN_W = 236;
 const STORAGE_KEY = "call-mini-window-geometry-v1";
 
 type Geometry = { x: number; y: number; w: number; h: number };
@@ -117,6 +116,8 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
     // 回复条配色：与壳里那条原生回复条共用同一批主题键，选一次两边都变
     const [theme, setTheme] = useState(() => resolveCallOverlayTheme(loadCallOverlayTheme()));
     useEffect(() => subscribeCallOverlayTheme(key => setTheme(resolveCallOverlayTheme(key))), []);
+    // 键盘高度（供贴底输入条避让；小窗本体不需要，它是 fixed 定位）
+    const keyboardOffsetStyle = useCallKeyboardOffsetStyle();
     const replyInputRef = useRef<HTMLInputElement | null>(null);
     const longPressRef = useRef<number | null>(null);
     // 长按是否已触发：抬手时不能再当成「轻点回全屏」，
@@ -367,22 +368,24 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
         </div>
     );
 
-    // 长按弹出的快捷回复条：挂在小窗正上方（贴不到就落回窗口下方），
-    // 宽度至少 REPLY_MIN_W —— 小窗本身可能只有 88px 宽，塞不下输入框。
-    const replyBarW = Math.max(geo.w, REPLY_MIN_W);
-    const vp = viewport();
-    const replyLeft = Math.min(Math.max(EDGE, geo.x + geo.w - replyBarW), Math.max(EDGE, vp.w - replyBarW - EDGE));
-    const replyAbove = geo.y - 46 >= EDGE;
-    const replyTop = replyAbove ? geo.y - 46 : Math.min(geo.y + geo.h + 8, vp.h - 54);
-
+    // 长按弹出的快捷回复条：贴页面底部，跟着键盘一起顶上来。
+    //
+    // 原先是挂在小窗旁边（正上方或正下方），结果小窗就在那一带时输入条会
+    // 直接盖住小窗——小窗是通话的唯一入口，被盖住就点不到了。改成通栏贴底：
+    // 它只占屏幕最下面一条，小窗一般悬在中上或右侧，两者不再打架。
+    //
+    // 键盘避让交给 --call-keyboard-offset（useCallKeyboardOffsetStyle 实测写入）：
+    // Android 壳里键盘由原生容器内边距让位、WebView 本身变矮，iOS 走
+    // visualViewport 实测，两条路在这个变量上统一。
     const replyNode = showReply ? (
         <div
             data-call-mini-reply=""
             style={{
+                ...keyboardOffsetStyle,
                 position: "fixed",
-                left: replyLeft,
-                top: replyTop,
-                width: replyBarW,
+                left: 8,
+                right: 8,
+                bottom: "calc(8px + var(--call-keyboard-offset, 0px))",
                 display: "flex",
                 alignItems: "center",
                 gap: 6,

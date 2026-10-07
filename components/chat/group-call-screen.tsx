@@ -22,6 +22,8 @@ import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
 import { useShellCallOverlay } from "./use-shell-call-overlay";
+import { CallAutoChatControl } from "./call-auto-chat-control";
+import { useCallAutoChat } from "./use-call-auto-chat";
 import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
@@ -98,6 +100,9 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     const interimTextRef = useRef<string>("");
     // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
     const callDurationRef = useRef(0);
+    // 自动搭话的通知口：runConversationTurn 定义在 useCallAutoChat 之前，
+    // 用 ref 转发避开循环依赖
+    const autoChatNotifyRef = useRef<{ userSpoke: () => void; assistantSpoke: (produced: boolean) => void } | null>(null);
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const userNameRef = useRef<string>("你");
@@ -232,6 +237,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     // ── Conversation turn ────────────────────────────
     const runConversationTurn = useCallback(async (userText?: string) => {
         if (userText) {
+            // 用户开口：自动搭话重新计数（上限按「你开口后」重新算）
+            autoChatNotifyRef.current?.userSpoke();
             const userMsg = pushChatMessage({
                 sessionId: session.id, role: "user", content: userText,
             });
@@ -306,7 +313,11 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 setSpeakingCharId(null);
             }
 
-            if (stateRef.current !== "ENDED") setCallState("IDLE");
+            if (stateRef.current !== "ENDED") {
+                // 说完一轮：安排下一次自动搭话
+                autoChatNotifyRef.current?.assistantSpoke(true);
+                setCallState("IDLE");
+            }
         } catch (error: any) {
             console.error("[GroupCall] Error:", error);
             if (stateRef.current !== "ENDED") {
@@ -314,6 +325,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                     id: `err-${Date.now()}`, role: "assistant",
                     text: `⚠️ ${error?.message || "发送失败"}`,
                 }]);
+                autoChatNotifyRef.current?.assistantSpoke(false);
                 setCallState("IDLE");
             }
         }
@@ -445,6 +457,26 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd, callTypeLabel]);
+
+    // 自动搭话：没人出声时让群里随机某位主动找话说（与语音/视频通话同一套配置）。
+    // 放在 runConversationTurn / handleHangup 之后，避免 const 的暂时性死区。
+    const autoChat = useCallAutoChat({
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+        callStateRef: stateRef,
+        runTurn: () => { void runConversationTurn(); },
+        beforeTrigger: () => {
+            // 触发前先停掉在听的识别，免得把角色自己的声音录进去
+            if (sttRef.current) {
+                sttRef.current.abort();
+                sttRef.current = null;
+            }
+            setInterimText("");
+        },
+    });
+    autoChatNotifyRef.current = {
+        userSpoke: autoChat.notifyUserSpoke,
+        assistantSpoke: autoChat.notifyAssistantSpoke,
+    };
 
     // 通话音频会话 + 卸载兜底：不经挂断键退出时释放识别与在途播放，
     // 防止识别自动重启循环在后台无限自我重启、麦克风永不归还（详见 voice-call-screen）。
@@ -698,6 +730,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 meta={[`${characters.length + 1}人`, formatTime(callDuration)]}
                 ariaLabel={`返回群${callTypeLabel}`}
                 onRestore={onRestore}
+                // 长按小窗就地回复，不必先跳回通话界面
+                onReply={(text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); }}
             />
         );
     }
@@ -712,6 +746,10 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
         return (
             <div className="gcall-video-root voicecall-controls call-keyboard-shift" style={keyboardOffsetStyle}>
                 <CallVolumeControl />
+                {/* 自动搭话：没人出声时让群里随机某位主动找话说 */}
+                {callState !== "CONNECTING" && callState !== "ENDED" && (
+                    <CallAutoChatControl config={autoChat.config} onUpdate={autoChat.update} />
+                )}
                 {onMinimize && callState !== "ENDED" && callState !== "CONNECTING" && (
                     <button
                         type="button"
@@ -825,6 +863,11 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             <div className="call-overlay" {...(voiceBgResolved ? { "data-has-image": "" } : {})} />
 
             <CallVolumeControl />
+
+            {/* 自动搭话：没人出声时让群里随机某位主动找话说 */}
+            {callState !== "CONNECTING" && callState !== "ENDED" && (
+                <CallAutoChatControl config={autoChat.config} onUpdate={autoChat.update} />
+            )}
 
             {onMinimize && callState !== "ENDED" && callState !== "CONNECTING" && (
                 <button

@@ -114,7 +114,6 @@ export function useShellCallOverlay(params: UseShellCallOverlayParams) {
             return;
         }
         if (!overlayStartedRef.current) {
-            overlayStartedRef.current = true;
             const allowed = startShellCallOverlay({
                 name: handlers.name,
                 avatar: handlers.avatar,
@@ -125,6 +124,13 @@ export function useShellCallOverlay(params: UseShellCallOverlayParams) {
                 elapsedSeconds: handlers.getDuration(),
             });
             setShowPermissionHint(!allowed);
+            // 只有真起来了才算预热完成。
+            //
+            // 这里曾经是先置位、后启动，于是「启动失败」也被记成「已预热」：
+            // 之后每次切后台只调 show/hide（服务没起来时是空操作），再也不重试，
+            // 表现为「失败一次之后浮窗永远不再出现」。保持 false 则下次可见性
+            // 变化会重新尝试启动。
+            overlayStartedRef.current = allowed;
         }
         if (pageHidden) {
             showShellCallOverlay();

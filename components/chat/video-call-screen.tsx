@@ -25,6 +25,8 @@ import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
 import { useShellCallOverlay } from "./use-shell-call-overlay";
+import { CallAutoChatControl } from "./call-auto-chat-control";
+import { useCallAutoChat } from "./use-call-auto-chat";
 import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
@@ -112,6 +114,9 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const isSpeakerMutedRef = useRef<boolean>(false);
     // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
     const callDurationRef = useRef(0);
+    // 自动搭话的通知口：runConversationTurn 定义在 useCallAutoChat 之前，
+    // 用 ref 转发避开循环依赖（hook 在下面登记，不参与渲染）
+    const autoChatNotifyRef = useRef<{ userSpoke: () => void; assistantSpoke: (produced: boolean) => void } | null>(null);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
     const userNameRef = useRef<string>(_initUi?.name || "你");
     const userAvatarRef = useRef<string | null>(resolveChatUserAvatar(session, _initUi?.avatarUrl) || null);
@@ -435,6 +440,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     const runConversationTurn = useCallback(async (userText?: string) => {
         if (userText) {
+            // 用户开口：自动搭话重新计数（上限按「你开口后」重新算）
+            autoChatNotifyRef.current?.userSpoke();
             const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText });
             messagesRef.current = [...messagesRef.current, userMsg];
             setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
@@ -454,16 +461,18 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             const displayText = cleanParts.join("\n");
             const speechText = stripBilingualForSpeech(displayText);
 
-            if (!displayText) { setCallState("IDLE"); return; }
-
-            setSubtitles(prev => [...prev, { id: `ai-${Date.now()}`, role: "assistant", text: displayText }]);
-
-            // 缩小为悬浮窗期间收到的回复：只静默记录文字，不播放语音
-            if (minimizedRef.current) {
+            if (!displayText) {
+                // 这轮角色没说出内容：通知自动搭话下次等更久，避免空转连发
+                autoChatNotifyRef.current?.assistantSpoke(false);
                 setCallState("IDLE");
                 return;
             }
 
+            setSubtitles(prev => [...prev, { id: `ai-${Date.now()}`, role: "assistant", text: displayText }]);
+
+            // 缩成悬浮窗也照常播语音：用户要的是「通话继续」，
+            // 不是「缩小之后角色变成哑巴」。播放不打断、识别与计时也照常，
+            // 与语音通话屏的处理保持一致。
             setCallState("AI_SPEAKING");
 
             const voiceConfig = resolveVoiceConfig(session.contactId);
@@ -480,10 +489,15 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 } catch (e) { console.warn("[VideoCall] TTS failed:", e); }
             }
 
-            if (stateRef.current !== "ENDED") setCallState("IDLE");
+            if (stateRef.current !== "ENDED") {
+                // 说完一轮：安排下一次自动搭话
+                autoChatNotifyRef.current?.assistantSpoke(true);
+                setCallState("IDLE");
+            }
         } catch (error: any) {
             if (stateRef.current !== "ENDED") {
                 setSubtitles(prev => [...prev, { id: `err-${Date.now()}`, role: "assistant", text: `⚠️ ${error?.message || "发送失败"}` }]);
+                autoChatNotifyRef.current?.assistantSpoke(false);
                 setCallState("IDLE");
             }
         }
@@ -650,6 +664,27 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         },
     });
 
+    // 自动搭话：我不出声时让角色主动找话说（与语音通话同一套配置与节拍）。
+    // 放在 runConversationTurn / handleHangup 之后，避免 const 的暂时性死区。
+    const autoChat = useCallAutoChat({
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+        callStateRef: stateRef,
+        runTurn: () => { void runConversationTurn(); },
+        beforeTrigger: () => {
+            // 触发前先停掉在听的识别，免得把角色自己的声音录进去
+            if (sttRef.current) {
+                sttRef.current.abort();
+                sttRef.current = null;
+            }
+            setInterimText("");
+        },
+    });
+    // 把通知口交给 runConversationTurn 使用
+    autoChatNotifyRef.current = {
+        userSpoke: autoChat.notifyUserSpoke,
+        assistantSpoke: autoChat.notifyAssistantSpoke,
+    };
+
     // 通话音频会话 + 卸载兜底：不经挂断键退出时释放识别与在途播放，
     // 防止识别自动重启循环在后台无限自我重启、麦克风永不归还（详见 voice-call-screen）。
     useEffect(() => {
@@ -672,6 +707,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 meta={["视频通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的视频通话`}
                 onRestore={onRestore}
+                // 长按小窗就地回复，不必先跳回通话界面
+                onReply={(text) => { if (stateRef.current === "IDLE") void runConversationTurn(text); }}
             />
         );
     }
@@ -693,6 +730,11 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     </svg>
                 </button>
             )}
+            {/* 自动搭话：我不出声时让角色主动找话说（煲电话粥用） */}
+            {callState !== "CONNECTING" && callState !== "ENDED" && (
+                <CallAutoChatControl config={autoChat.config} onUpdate={autoChat.update} />
+            )}
+
             {/* Full-screen blurred background (character avatar) */}
             <div
                 className="videocall-bg-blur"

@@ -18,15 +18,27 @@ import {
     saveCallOverlayTheme,
     subscribeCallOverlayTheme,
 } from "@/lib/call-overlay-theme";
-import { isShellEnvironment } from "@/lib/shell-call-overlay";
+import {
+    isShellEnvironment,
+    openAccessibilitySettings,
+    readShellOverlayTrace,
+    requestOverlayPermission,
+    useShellOverlayStatus,
+} from "@/lib/shell-call-overlay";
 
 export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => void }) {
     const [themeKey, setThemeKey] = useState(() => loadCallOverlayTheme());
     const [inShell, setInShell] = useState(false);
+    const [status, refreshStatus] = useShellOverlayStatus();
+    const [trace, setTrace] = useState(() => readShellOverlayTrace());
 
     useEffect(() => {
         setInShell(isShellEnvironment());
     }, []);
+
+    // 诊断区随权限状态刷新一起拉最新留痕：用户从系统设置授权后回来，
+    // 一眼能看到权限变了没、原生事件有没有到过。
+    useEffect(() => { setTrace(readShellOverlayTrace()); }, [status]);
 
     // 别处改了主题（例如另一个页面）也跟着刷新选中项
     useEffect(() => subscribeCallOverlayTheme(key => setThemeKey(key)), []);
@@ -104,6 +116,86 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
                         当前不在安卓壳里，所以只影响小手机内的小窗回复条；在壳里打开时会同时换掉桌面浮窗那条。
                     </div>
                 )}
+            </div>
+
+            <div className="app-card p-4 flex flex-col gap-3">
+                <div>
+                    <div className="ts-14 font-semibold">诊断</div>
+                    <div className="ts-12 mt-1" style={{ color: "var(--c-text)", opacity: 0.75 }}>
+                        浮窗不出现时先看这里：权限没开会标红；切出去再回来，事件列表里应能看到原生推来的消息。
+                    </div>
+                </div>
+
+                <div className="flex flex-col gap-1 ts-12" style={{ color: "var(--c-text)" }}>
+                    <span>壳环境：{status.inShell ? `是（v${status.version || "?"}）` : "否（普通浏览器）"}</span>
+                    <span>支持浮窗：{status.supported ? "是" : "否（壳版本过旧）"}</span>
+                    <span>
+                        浮窗权限：
+                        <strong style={{ color: status.canDraw ? "var(--c-success, #30A46C)" : "var(--c-danger, #E5484D)" }}>
+                            {status.canDraw ? "已开启" : "未开启"}
+                        </strong>
+                    </span>
+                    <span>
+                        无障碍：
+                        <strong style={{ color: status.accessibility ? "var(--c-success, #30A46C)" : "var(--c-text)" }}>
+                            {status.accessibility ? "已开启" : "未开启"}
+                        </strong>
+                    </span>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                    <button
+                        type="button"
+                        className="ts-12"
+                        onClick={() => { requestOverlayPermission(); }}
+                        style={{ border: "1px solid rgba(128,128,128,0.3)", borderRadius: 10, padding: "6px 12px", background: "transparent", color: "var(--c-text-title)", cursor: "pointer" }}
+                    >
+                        去开浮窗权限
+                    </button>
+                    <button
+                        type="button"
+                        className="ts-12"
+                        onClick={() => { openAccessibilitySettings(); }}
+                        style={{ border: "1px solid rgba(128,128,128,0.3)", borderRadius: 10, padding: "6px 12px", background: "transparent", color: "var(--c-text-title)", cursor: "pointer" }}
+                    >
+                        去开无障碍
+                    </button>
+                    <button
+                        type="button"
+                        className="ts-12"
+                        onClick={() => { refreshStatus(); setTrace(readShellOverlayTrace()); }}
+                        style={{ border: "1px solid rgba(128,128,128,0.3)", borderRadius: 10, padding: "6px 12px", background: "transparent", color: "var(--c-text-title)", cursor: "pointer" }}
+                    >
+                        重新检测
+                    </button>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                    <div className="ts-12" style={{ color: "var(--c-text)", opacity: 0.75 }}>
+                        最近的浮窗事件（{trace.length} 条）
+                    </div>
+                    {trace.length === 0 ? (
+                        <div className="ts-12" style={{ color: "var(--c-text)", opacity: 0.6 }}>
+                            还没有收到过原生事件。通话时切出去再回来，这里应该会出现 tick / restore 之类的记录。
+                        </div>
+                    ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 190, overflowY: "auto" }}>
+                            {[...trace].reverse().map((item, index) => (
+                                <div key={`${item.at}-${index}`} className="ts-12" style={{ display: "flex", gap: 8, color: "var(--c-text)" }}>
+                                    <span style={{ opacity: 0.6, flexShrink: 0 }}>
+                                        {new Date(item.at).toLocaleTimeString("zh-CN", { hour12: false })}
+                                    </span>
+                                    <span style={{ fontWeight: 600, flexShrink: 0 }}>{item.event.action}</span>
+                                    <span style={{ opacity: 0.8, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                        {item.event.text ? `「${item.event.text}」` : ""}
+                                        {typeof item.event.seconds === "number" ? ` ${item.event.seconds}s` : ""}
+                                        {item.event.package ? ` ${item.event.package}` : ""}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
             </div>
 
             <div className="app-card p-4 flex flex-col gap-2">

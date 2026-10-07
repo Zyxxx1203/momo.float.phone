@@ -164,9 +164,44 @@ class CallOverlayService : Service() {
          * 被系统拒绝、异常又被吞掉，表现就是「浮窗有时不弹，但声音照旧」。
          */
         fun show(context: Context) {
+            // 优先同进程直接操作实例：绕开 Android 12+ 对后台启动服务的限制，
+            // 也免掉 Intent 投递的时序竞态（竞态会让「刚接通就切出去」这一下落空）。
+            val instance = liveInstance
+            if (instance != null) {
+                instance.main.post { instance.showOverlay(true) }
+                return
+            }
             if (!running) return
             runCatching {
                 context.startService(Intent(context, CallOverlayService::class.java).apply { action = ACTION_SHOW })
+            }
+        }
+
+        /**
+         * 宿主 Activity 进入后台（onStop）：把预热好的浮窗亮出来。
+         *
+         * 这是浮窗可见性的主路径，不再只依赖网页的 visibilitychange + 桥调用。
+         * 原因：App 一退到后台，WebView 的 JS 随时会被系统冻结或节流，那条
+         * 「网页通知原生显示」的链路本身就会断——表现正是「退出去以后浮窗不弹，
+         * 但声音照旧」（放音在原生/媒体通道，不依赖网页）。而 Activity 的
+         * onStop/onStart 是系统直接给的，不受 JS 是否还在跑影响。
+         *
+         * 实例不存在（当前没在通话、或预热失败）：什么都不做。此刻 App 已在
+         * 后台，绝不能在这里 startForegroundService，系统会直接拒绝。
+         */
+        fun onHostBackground() {
+            hostInForeground = false
+            val instance = liveInstance ?: return
+            instance.main.post { instance.showOverlay(true) }
+        }
+
+        /** 宿主 Activity 回到前台（onStart）：把浮窗藏起来，服务继续跑。 */
+        fun onHostForeground() {
+            hostInForeground = true
+            val instance = liveInstance ?: return
+            instance.main.post {
+                instance.showOverlay(false)
+                instance.removeReplyBar()
             }
         }
 
@@ -181,6 +216,17 @@ class CallOverlayService : Service() {
         /** 正在运行的实例：主题改动时用它把已弹出的回复条就地重绘。 */
         @Volatile
         private var liveInstance: CallOverlayService? = null
+
+        /**
+         * 宿主 Activity 是否在前台。
+         *
+         * 用于堵一个时序漏洞：用户拨号后立刻切走，那 3 秒接通动画结束时 App 已在
+         * 后台，此刻 startForegroundService 会被 Android 12+ 拒绝、浮窗建不出来。
+         * 有了这个标记，ACTION_START 就能判断「该不该立刻亮出来」——预热动作本身
+         * 仍在通话屏挂载时（前台）完成，不受限制。
+         */
+        @Volatile
+        private var hostInForeground = true
 
         /** 主题键（见 ReplyTheme）。存进 SharedPreferences，下次通话沿用。 */
         fun currentTheme(context: Context): String =
@@ -251,7 +297,9 @@ class CallOverlayService : Service() {
                 // 登记实例：主题改动时要靠它把已弹出的回复条就地重绘
                 liveInstance = this
                 setElapsedBase(intent.getIntExtra(EXTRA_ELAPSED, 0))
-                showOverlay(visible = false)
+                // 正常情况下预热只建窗口不显示，等切后台再亮；
+                // 但若此刻 App 已在后台（拨号中途切走），就直接显示出来。
+                showOverlay(visible = !hostInForeground)
                 startHeartbeat()
             }
             ACTION_SHOW -> {
@@ -261,7 +309,7 @@ class CallOverlayService : Service() {
             }
             ACTION_HIDE -> {
                 // 回到前台：只把窗口藏起来，服务继续跑，计时与自动搭话不断
-                rootView?.visibility = View.GONE
+                showOverlay(visible = false)
                 removeReplyBar()
             }
             ACTION_UPDATE -> {
@@ -387,6 +435,9 @@ class CallOverlayService : Service() {
 
     private var rootView: View? = null
     private var rootLayout: FrameLayout? = null
+    /** 浮窗是否应该可见。预热时窗口已建好但先藏着，真正的显隐由它决定，
+     *  这样「切后台」与「建窗口」两条时序谁先到都不会错。 */
+    private var overlayVisible = false
     private var bgImage: ImageView? = null
     private var nameView: TextView? = null
     private var metaView: TextView? = null
@@ -485,18 +536,30 @@ class CallOverlayService : Service() {
             ShellBus.dispatchOverlayEvent("needPermission")
             return
         }
+        overlayVisible = visible
         loadGeometry()
         main.post {
             if (rootView == null) {
                 val layout = FrameLayout(this)
-                rootLayout = layout
                 buildContentView(layout)
+                // 只有真挂上窗口才算建好。
+                // 之前是先赋值 rootView 再 addView，异常还被静默吞掉：一旦 addView
+                // 失败，rootView 就非空而窗口并不存在，之后每次 show 都只是去改一个
+                // 没挂上的 View 的可见性——浮窗永远不出现，且没有任何报错。
+                val added = runCatching { windowManager.addView(layout, buildLayoutParams()) }.isSuccess
+                if (!added) {
+                    rootLayout = null
+                    ShellBus.dispatchOverlayEvent("needPermission")
+                    return@post
+                }
+                rootLayout = layout
                 rootView = layout
-                runCatching { windowManager.addView(layout, buildLayoutParams()) }
             }
             renderOverlay()
             refreshAvatarAsync()
-            rootView?.visibility = if (visible) View.VISIBLE else View.GONE
+            // 用最新意图而不是本次调用的入参：窗口是异步建的，这期间
+            // 可能又来了 show/hide，按最新意图决定可见性才不会错。
+            rootView?.visibility = if (overlayVisible) View.VISIBLE else View.GONE
         }
         updateNotification()
     }

@@ -17,10 +17,10 @@ android {
         minSdk 26
         targetSdk 34
         // versionCode 必须严格递增，否则 Android 拒绝覆盖安装（表现为「应用未安装」）。
-        // 1.0.3：网页消息的原生系统通知能力；1.0.4：通话浮窗 + 无障碍服务。
-        // 1.0.5：浮窗预热（修「有时不弹」）+ 计时只进不退 + 回复条主题与「回到通话」按钮。
-        versionCode 4
-        versionName "1.0.5"
+        // 1.0.4：通话浮窗 + 无障碍服务；1.0.5：浮窗预热与计时修正。
+        // 1.0.6：浮窗显隐改由 Activity 生命周期直接驱动（修「退出去不弹」）。
+        versionCode 5
+        versionName "1.0.6"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

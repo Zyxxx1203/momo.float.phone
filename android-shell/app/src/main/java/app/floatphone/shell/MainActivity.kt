@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.4"
+        const val VERSION = "1.0.6"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -422,6 +422,25 @@ class MainActivity : AppCompatActivity() {
         } else {
             PushService.start(this)
         }
+    }
+
+    /**
+     * App 退到后台／回到前台：直接驱动浮窗显隐。
+     *
+     * 这是浮窗可见性的主路径，不再只依赖网页 visibilitychange + 桥调用。
+     * 原因：App 一退到后台，WebView 的 JS 会被系统冻结或节流，那条
+     * 「网页通知原生显示」的链路本身就会断——表现正是「退出去后浮窗不弹，
+     * 但声音照旧」（放音走媒体通道，不依赖网页）。Activity 的生命周期回调
+     * 由系统直接给，不受 JS 是否还在跑影响。
+     */
+    override fun onStop() {
+        super.onStop()
+        CallOverlayService.onHostBackground()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        CallOverlayService.onHostForeground()
     }
 
     override fun onDestroy() {

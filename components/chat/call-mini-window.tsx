@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { loadCallOverlayTheme, resolveCallOverlayTheme, subscribeCallOverlayTheme } from "@/lib/call-overlay-theme";
+import { loadCallOverlayColors, subscribeCallOverlayTheme } from "@/lib/call-overlay-theme";
 import { useCallKeyboardOffsetStyle } from "./use-call-keyboard-offset";
 
 type CallMiniWindowProps = {
@@ -56,6 +56,18 @@ const LONG_PRESS_MS = 480;
 const STORAGE_KEY = "call-mini-window-geometry-v1";
 
 type Geometry = { x: number; y: number; w: number; h: number };
+
+/** #RRGGBB + 透明度 → rgba()。主题里颜色一律不带 alpha（原生 Color.parseColor
+ *  只认 #RRGGBB，带 alpha 的 #RRGGBBAA 会让它整条回落默认色），透明度单独存。 */
+function hexToRgba(hex: string, alpha: number): string {
+    const value = hex.replace("#", "");
+    if (value.length !== 6) return hex;
+    const r = parseInt(value.slice(0, 2), 16);
+    const g = parseInt(value.slice(2, 4), 16);
+    const b = parseInt(value.slice(4, 6), 16);
+    if ([r, g, b].some(Number.isNaN)) return hex;
+    return `rgba(${r}, ${g}, ${b}, ${Math.min(1, Math.max(0, alpha))})`;
+}
 
 function viewport() {
     if (typeof window === "undefined") return { w: 390, h: 844 };
@@ -113,9 +125,9 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
     // 概念，就把一条 fixed 输入条挂在小窗旁边，发完自动收起。
     const [showReply, setShowReply] = useState(false);
     const [replyText, setReplyText] = useState("");
-    // 回复条配色：与壳里那条原生回复条共用同一批主题键，选一次两边都变
-    const [theme, setTheme] = useState(() => resolveCallOverlayTheme(loadCallOverlayTheme()));
-    useEffect(() => subscribeCallOverlayTheme(key => setTheme(resolveCallOverlayTheme(key))), []);
+    // 回复条配色：与壳里那条原生回复条共用同一份配色（含逐项自定义），改一次两边都变
+    const [colors, setColors] = useState(() => loadCallOverlayColors());
+    useEffect(() => subscribeCallOverlayTheme(() => setColors(loadCallOverlayColors())), []);
     // 键盘高度（供贴底输入条避让；小窗本体不需要，它是 fixed 定位）
     const keyboardOffsetStyle = useCallKeyboardOffsetStyle();
     const replyInputRef = useRef<HTMLInputElement | null>(null);
@@ -391,7 +403,9 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
                 gap: 6,
                 padding: "6px 8px",
                 borderRadius: 12,
-                background: theme.bar,
+                // 条身透明度单独一项：主题里存 #RRGGBB + barAlpha，这里拼成 rgba，
+                // 与原生 Color.argb 出来的结果一致
+                background: hexToRgba(colors.bar, colors.barAlpha),
                 boxShadow: "0 8px 24px rgba(0,0,0,0.42)",
                 zIndex: 9001,
                 touchAction: "manipulation",
@@ -414,7 +428,7 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
                     border: "none",
                     outline: "none",
                     background: "transparent",
-                    color: theme.text,
+                    color: colors.text,
                     fontSize: 13,
                     padding: "4px 2px",
                 }}
@@ -431,34 +445,32 @@ export function CallMiniWindow({ imageUrl, title, meta, ariaLabel, onRestore, on
                     padding: "5px 11px",
                     fontSize: 12.5,
                     fontWeight: 600,
-                    color: "#fff",
-                    background: replyText.trim() ? theme.accent : "rgba(128,128,128,0.28)",
+                    color: colors.sendText,
+                    background: replyText.trim() ? colors.accent : "rgba(128,128,128,0.28)",
                     cursor: replyText.trim() ? "pointer" : "default",
                 }}
             >
                 发送
             </button>
-            {/* 回到全屏通话：长按弹条后不想再靠「轻点小窗」跳转时走这里 */}
+            {/* 只有「发送」和「收起」。
+                原先还有个「回到通话」——想回全屏直接轻点小窗即可，一条窄条上
+                挤三个按钮反而容易点错，故去掉。 */}
             <button
                 type="button"
-                onClick={() => { setShowReply(false); setReplyText(""); onRestore?.(); }}
-                aria-label="回到通话界面"
-                title="回到通话界面"
+                onClick={() => { setShowReply(false); setReplyText(""); }}
+                aria-label="收起"
+                title="收起"
                 style={{
                     flexShrink: 0,
-                    display: "flex",
                     border: "none",
                     background: "transparent",
-                    color: theme.muted,
-                    padding: 4,
+                    color: colors.muted,
+                    fontSize: 12.5,
+                    padding: "5px 4px",
                     cursor: "pointer",
                 }}
             >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M15 3h6v6" />
-                    <path d="M10 14L21 3" />
-                    <path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
-                </svg>
+                收起
             </button>
         </div>
     ) : null;

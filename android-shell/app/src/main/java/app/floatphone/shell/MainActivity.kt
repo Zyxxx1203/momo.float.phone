@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.6"
+        const val VERSION = "1.0.7"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -560,14 +560,14 @@ class MainActivity : AppCompatActivity() {
             runCatching { CallOverlayService.stop(this@MainActivity) }
         }
 
-        /** 读当前快捷回复条主题键（网页侧「通话浮窗外观」用它回显选中项）。 */
+        /** 读当前快捷回复条配色（网页侧「通话浮窗外观」用它回显预设与自定义项）。 */
         @JavascriptInterface
-        fun getOverlayTheme(): String = CallOverlayService.currentTheme(this@MainActivity)
+        fun getOverlayThemeJson(): String = CallOverlayService.currentThemeJson(this@MainActivity)
 
-        /** 设置快捷回复条主题键；已弹出的回复条会即时换色。 */
+        /** 下发完整配色（预设键 + 逐项自定义）；已弹出的回复条会即时换色。 */
         @JavascriptInterface
-        fun setOverlayTheme(key: String) {
-            runCatching { CallOverlayService.setTheme(this@MainActivity, key) }
+        fun setOverlayThemeJson(json: String) {
+            runCatching { CallOverlayService.setThemeJson(this@MainActivity, json) }
         }
 
         /** 浮窗权限是否已授予。 */

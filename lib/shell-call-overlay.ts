@@ -29,6 +29,9 @@ type ShellBridgeLike = {
     /** 快捷回复条配色主题（存在壳侧 SharedPreferences） */
     getOverlayTheme?: () => string;
     setOverlayTheme?: (key: string) => void;
+    /** 完整配色的 JSON（预设键 + 逐项自定义），新壳才有 */
+    getOverlayThemeJson?: () => string;
+    setOverlayThemeJson?: (json: string) => void;
     isAccessibilityConnected?: () => boolean;
     openAccessibilitySettings?: () => void;
 };
@@ -190,6 +193,31 @@ export function setShellOverlayTheme(key: string): void {
 /** 壳是否支持自定义回复条主题（老 APK 没有）。 */
 export function supportsOverlayTheme(): boolean {
     return typeof bridge()?.setOverlayTheme === "function";
+}
+
+/** 读壳里存的完整配色 JSON（老 APK 返回空串）。 */
+export function getShellOverlayThemeJson(): string {
+    try {
+        return bridge()?.getOverlayThemeJson?.() ?? "";
+    } catch {
+        return "";
+    }
+}
+
+/** 下发完整配色 JSON（预设键 + 自定义覆盖）；已弹出的回复条会即时重绘。 */
+export function setShellOverlayThemeJson(json: string): void {
+    const b = bridge();
+    if (!b?.setOverlayThemeJson) return;
+    try {
+        b.setOverlayThemeJson(json);
+    } catch {
+        /* 忽略 */
+    }
+}
+
+/** 壳是否支持逐项自定义配色（老 APK 只认主题键）。 */
+export function supportsOverlayCustomColors(): boolean {
+    return typeof bridge()?.setOverlayThemeJson === "function";
 }
 
 /** 收掉原生浮窗 */

@@ -68,20 +68,69 @@ data class ReplyTheme(
     val hint: Int,
     /** 发送键底色 */
     val accent: Int,
-    /** 次要按钮（收起 / 回到通话）文字 */
+    /** 发送键文字（浅色底上白字会看不清，故单列一项） */
+    val sendText: Int,
+    /** 次要按钮（收起）文字 */
     val muted: Int,
 ) {
     companion object {
-        val DARK = ReplyTheme("dark", "暗夜", 0xF21B1B22.toInt(), Color.WHITE, 0xFF8A93A6.toInt(), 0xFF3B82F6.toInt(), 0xFFC9D1E0.toInt())
-        val LIGHT = ReplyTheme("light", "浅色", 0xF2FFFFFF.toInt(), 0xFF1B1B22.toInt(), 0xFF8A93A6.toInt(), 0xFF3B82F6.toInt(), 0xFF5A6270.toInt())
-        val OCEAN = ReplyTheme("ocean", "深海", 0xF20E1A2B.toInt(), Color.WHITE, 0xFF7E8DA6.toInt(), 0xFF4C8DFF.toInt(), 0xFF9FB0C9.toInt())
-        val SAKURA = ReplyTheme("sakura", "樱粉", 0xF22A1B24.toInt(), Color.WHITE, 0xFFB08A9C.toInt(), 0xFFE56B9A.toInt(), 0xFFC9A3B3.toInt())
-        val BAMBOO = ReplyTheme("bamboo", "青竹", 0xF2152419.toInt(), Color.WHITE, 0xFF8AA694.toInt(), 0xFF30A46C.toInt(), 0xFFA3C9B3.toInt())
-        val VIOLET = ReplyTheme("violet", "夜幕", 0xF21D182B.toInt(), Color.WHITE, 0xFF938AA6.toInt(), 0xFF9B6BFF.toInt(), 0xFFB3A9C9.toInt())
+        fun build(key: String, label: String, bar: Long, text: Long, hint: Long, accent: Long, sendText: Long, muted: Long) =
+            ReplyTheme(key, label, bar.toInt(), text.toInt(), hint.toInt(), accent.toInt(), sendText.toInt(), muted.toInt())
+
+        val DARK = build("dark", "暗夜", 0xF21B1B22, 0xFFFFFFFF, 0xFF8A93A6, 0xFF3B82F6, 0xFFFFFFFF, 0xFFC9D1E0)
+        val LIGHT = build("light", "浅色", 0xF2FFFFFF, 0xFF1B1B22, 0xFF8A93A6, 0xFF3B82F6, 0xFFFFFFFF, 0xFF5A6270)
+        val OCEAN = build("ocean", "深海", 0xF20E1A2B, 0xFFFFFFFF, 0xFF7E8DA6, 0xFF4C8DFF, 0xFFFFFFFF, 0xFF9FB0C9)
+        val SAKURA = build("sakura", "樱粉", 0xF22A1B24, 0xFFFFFFFF, 0xFFB08A9C, 0xFFE56B9A, 0xFFFFFFFF, 0xFFC9A3B3)
+        val BAMBOO = build("bamboo", "青竹", 0xF2152419, 0xFFFFFFFF, 0xFF8AA694, 0xFF30A46C, 0xFFFFFFFF, 0xFFA3C9B3)
+        val VIOLET = build("violet", "夜幕", 0xF21D182B, 0xFFFFFFFF, 0xFF938AA6, 0xFF9B6BFF, 0xFFFFFFFF, 0xFFB3A9C9)
 
         val ALL = listOf(DARK, LIGHT, OCEAN, SAKURA, BAMBOO, VIOLET)
 
         fun of(key: String?): ReplyTheme = ALL.firstOrNull { it.key == key } ?: DARK
+
+        /** 只认 #RRGGBB；解析不出就用兜底色。带 alpha 的 #AARRGGBB 也接受。 */
+        private fun parseColor(value: String?, fallback: Int): Int {
+            if (value.isNullOrBlank()) return fallback
+            return runCatching { Color.parseColor(value.trim()) }.getOrDefault(fallback)
+        }
+
+        /**
+         * 从网页下发的这份 JSON 构造实际配色：
+         * `{ "key": "dark", "custom": { "bar": "#223344", "barAlpha": 0.8, ... } }`
+         *
+         * 设计成「预设打底 + 逐项覆盖」：用户想一键换色就选预设，想细调就只覆盖某些项，
+         * 没动到的仍跟随预设，不必把八项全存一遍。老版本只存一个主题键，这里也兼容。
+         */
+        fun fromJson(json: String?): ReplyTheme {
+            val base = of(THEME_DEFAULT)
+            if (json.isNullOrBlank()) return base
+            val root = runCatching { JSONObject(json) }.getOrNull() ?: return base
+            val theme = of(root.optString("key", THEME_DEFAULT))
+            val custom = root.optJSONObject("custom") ?: return theme
+            // barAlpha 与 bar 分开：条身底色只存 RGB，透明度单独一项，
+            // 免得在 #RRGGBBAA 与 #AARRGGBB 两种写法之间来回出错。
+            val alpha = custom.optDouble("barAlpha", -1.0)
+                .takeIf { it in 0.0..1.0 }
+                ?.let { (it * 255).toInt() } ?: -1
+            val barColor = custom.optString("bar", "")
+            val bar = if (barColor.isNotBlank() && alpha >= 0) {
+                (alpha shl 24) or (parseColor(barColor, theme.bar and 0x00FFFFFF) and 0x00FFFFFF)
+            } else if (barColor.isNotBlank()) {
+                parseColor(barColor, theme.bar)
+            } else if (alpha >= 0) {
+                (alpha shl 24) or (theme.bar and 0x00FFFFFF)
+            } else {
+                theme.bar
+            }
+            return theme.copy(
+                bar = bar,
+                text = parseColor(custom.optString("text", ""), theme.text),
+                hint = parseColor(custom.optString("hint", ""), theme.hint),
+                accent = parseColor(custom.optString("accent", ""), theme.accent),
+                sendText = parseColor(custom.optString("sendText", ""), theme.sendText),
+                muted = parseColor(custom.optString("muted", ""), theme.muted),
+            )
+        }
     }
 }
 
@@ -107,9 +156,16 @@ class CallOverlayService : Service() {
         /** 网页传来的「已通话秒数」——浮窗是切出去才建的，不能从 0 自己数 */
         const val EXTRA_ELAPSED = "elapsed"
 
-        /** 快捷回复条的配色主题键（在网页侧「通话浮窗外观」里选，存 SharedPreferences） */
+        /**
+         * 快捷回复条配色（在网页侧「通话浮窗外观」里调，存 SharedPreferences）。
+         *
+         * 存的是网页下发的整份 JSON（预设键 + 逐项自定义），见 ReplyTheme.fromJson。
+         * 旧版本这里只存一个主题键，读取时若发现不是 JSON 就按老格式兼容。
+         */
         const val PREF_THEME = "overlay_theme"
         const val THEME_DEFAULT = "dark"
+        /** 旧版遗留的纯主题键存储位（1.0.5 及以前），读取时兜底用 */
+        private const val PREF_THEME_LEGACY = "overlay_theme_key"
 
         private const val MIN_W_DP = 88
         private const val MIN_H_DP = 120
@@ -228,18 +284,28 @@ class CallOverlayService : Service() {
         @Volatile
         private var hostInForeground = true
 
-        /** 主题键（见 ReplyTheme）。存进 SharedPreferences，下次通话沿用。 */
-        fun currentTheme(context: Context): String =
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getString(PREF_THEME, THEME_DEFAULT) ?: THEME_DEFAULT
+        /** 读取存下的配色 JSON（原始串，交给 ReplyTheme.fromJson 解析）。 */
+        fun currentThemeJson(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val raw = prefs.getString(PREF_THEME, null)
+            // 老版本存的是裸键（dark/light…），转成新格式，保证升级后颜色不丢
+            if (!raw.isNullOrBlank() && !raw.trimStart().startsWith("{")) {
+                return "{\"key\":\"" + ReplyTheme.of(raw).key + "\"}"
+            }
+            if (raw.isNullOrBlank()) {
+                val legacy = prefs.getString(PREF_THEME_LEGACY, null)
+                if (!legacy.isNullOrBlank()) return "{\"key\":\"" + ReplyTheme.of(legacy).key + "\"}"
+            }
+            return raw ?: ""
+        }
 
-        fun setTheme(context: Context, key: String) {
-            val safe = ReplyTheme.of(key).key
+        /** 写入配色 JSON（网页侧「通话浮窗外观」下发），并让已弹出的回复条即时重绘。 */
+        fun setThemeJson(context: Context, json: String) {
             runCatching {
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                    .edit().putString(PREF_THEME, safe).apply()
+                    .edit().putString(PREF_THEME, json).apply()
             }
-            liveInstance?.applyTheme(safe)
+            liveInstance?.applyThemeJson(json)
         }
 
         /** 浮窗权限是否已授予（Android 6+ 需用户在系统设置里手动开）。 */
@@ -836,12 +902,12 @@ class CallOverlayService : Service() {
         replyBarX = prefs.getInt("reply_x", 0)
         replyBarY = prefs.getInt("reply_y", screenH - barHeight - dp(90))
 
-        val theme = ReplyTheme.of(currentTheme(this))
+        val theme = ReplyTheme.fromJson(currentThemeJson(this))
 
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.parseColor("#F21B1B22"))
+            // 底色由 paintReplyTheme 按当前配色刷上，这里不写死，免得第一帧闪默认色
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
         replyInput = EditText(this).apply {
@@ -863,17 +929,9 @@ class CallOverlayService : Service() {
             setPadding(dp(14), dp(6), dp(14), dp(6))
             setOnClickListener { submitReply() }
         }
-        // 「回到通话」：长按弹出输入条后想直接回全屏通话走这里，
-        // 不必先收起再点小窗（少一步，也不容易点错成拖动）。
-        val restore = Button(this).apply {
-            text = "回到通话"
-            textSize = 13f
-            background = null
-            setOnClickListener {
-                removeReplyBar()
-                bringAppToFront()
-            }
-        }
+        // 回复条只留「发送」和「收起」。
+        // 原先还有个「回到通话」——用户反馈条上不要它：想回全屏直接轻点浮窗即可，
+        // 一条窄条上挤三个按钮反而容易点错。
         val close = Button(this).apply {
             text = "收起"
             textSize = 13f
@@ -882,10 +940,6 @@ class CallOverlayService : Service() {
         }
         bar.addView(replyInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         bar.addView(send, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ))
-        bar.addView(restore, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT,
         ))
@@ -985,20 +1039,20 @@ class CallOverlayService : Service() {
         bar.setBackgroundColor(theme.bar)
         replyInput?.setTextColor(theme.text)
         replyInput?.setHintTextColor(theme.hint)
-        replySend?.setTextColor(Color.WHITE)
+        replySend?.setTextColor(theme.sendText)
         replySend?.background = GradientDrawable().apply {
             cornerRadius = dp(8).toFloat()
             setColor(theme.accent)
         }
-        // 「回到通话」「收起」在布局里是第 3、4 个子控件（前两个是输入框和发送）
+        // 「收起」在布局里是第 3 个子控件（前两个是输入框和发送）
         for (index in 2 until bar.childCount) {
             (bar.getChildAt(index) as? Button)?.setTextColor(theme.muted)
         }
     }
 
-    /** 主题变了：已弹出的回复条就地重绘（网页侧切完主题立刻能看到效果）。 */
-    private fun applyTheme(key: String) {
-        val theme = ReplyTheme.of(key)
+    /** 配色变了：已弹出的回复条就地重绘（网页侧调完立刻能看到效果）。 */
+    private fun applyThemeJson(json: String) {
+        val theme = ReplyTheme.fromJson(json)
         main.post { paintReplyTheme(theme) }
     }
 

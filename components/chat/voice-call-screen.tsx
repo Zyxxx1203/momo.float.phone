@@ -25,6 +25,7 @@ import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
 import { type CallAutoChatConfig, MAX_TURNS_LIMIT, MIN_INTERVAL_SECONDS, loadCallAutoChatConfig, randomAutoChatDelaySeconds, saveCallAutoChatConfig } from "@/lib/call-auto-chat";
+import { ensureShellOverlayListener, isShellEnvironment, requestOverlayPermission, startShellCallOverlay, stopShellCallOverlay, subscribeShellOverlayEvents, supportsCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
 
@@ -116,6 +117,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // 自动搭话：进通话时读一次配置；改动即时存盘并热生效
     const [autoChatConfig, setAutoChatConfig] = useState<CallAutoChatConfig>(() => loadCallAutoChatConfig());
     const [showAutoChatPanel, setShowAutoChatPanel] = useState(false);
+    // 安卓壳里：切到别的 App 时用原生浮窗顶上（浮窗权限未开时给一条引导）
+    const [showOverlayHint, setShowOverlayHint] = useState(false);
 
     const sttRef = useRef<STTSession | null>(null);
     const audioAbortRef = useRef<(() => void) | null>(null);
@@ -134,6 +137,11 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const emptyAutoTurnsRef = useRef(0);
     // 配置的 ref 快照：心跳里读最新值，不必因设置变化重建定时器
     const autoChatConfigRef = useRef<CallAutoChatConfig>(autoChatConfig);
+    // 本次通话的 id：原生浮窗事件带上它，用来确认事件属于当前这一通
+    const shellCallIdRef = useRef(`call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    // handleHangup 依赖 callDuration（每秒都变），直接进 effect 依赖会让监听器
+    // 每秒重装一次；用 ref 转发，订阅只建立一次。
+    const hangupRef = useRef<() => void>(() => {});
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
@@ -489,6 +497,46 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         }
     }, [session, processAIResponse, playCallAudio, scheduleNextAutoChat]);
 
+    // ── 安卓壳原生浮窗 ──────────────────────────────
+    //
+    // 通话中切到别的 App 时，网页小窗会随浏览器一起被切走；壳里的原生浮窗
+    // （CallOverlayService）能浮在任何 App 上层。触发条件用「页面是否可见」
+    // 而不是「是否按了缩小键」——用户直接切走而不点缩小时同样要顶出来。
+    const shellOverlaySupported = typeof window !== "undefined" && supportsCallOverlay();
+    const [pageHidden, setPageHidden] = useState(false);
+
+    useEffect(() => {
+        if (typeof document === "undefined") return;
+        const onVisibility = () => setPageHidden(document.visibilityState === "hidden");
+        document.addEventListener("visibilitychange", onVisibility);
+        onVisibility();
+        return () => document.removeEventListener("visibilitychange", onVisibility);
+    }, []);
+
+    useEffect(() => {
+        if (!shellOverlaySupported) return;
+        if (callState === "ENDED" || callState === "CONNECTING") {
+            stopShellCallOverlay();
+            return;
+        }
+        // App 在前台时不顶浮窗：界面内的通话屏/小窗已经够用，省得两层叠着
+        if (!pageHidden) {
+            setShowOverlayHint(false);
+            stopShellCallOverlay();
+            return;
+        }
+        const allowed = startShellCallOverlay({
+            name: character.name,
+            avatar: bgImageResolved || character.avatar || null,
+            // {{time}} 交给原生替换成它自己维护的计时：WebView 被冻结也不停
+            meta: ["语音通话", "{{time}}"],
+            callId: shellCallIdRef.current,
+        });
+        // 没权限时给出引导（浮窗要用户手动去系统设置里开）
+        setShowOverlayHint(!allowed);
+        return () => { /* 由上面的分支负责收掉 */ };
+    }, [shellOverlaySupported, pageHidden, callState, character.name, character.avatar, bgImageResolved]);
+
     // ── 自动搭话：心跳 ───────────────────────────────
     //
     // 每秒看一眼：通话处于 IDLE（谁也没在说）、没超上限、已过随机等待点，
@@ -694,6 +742,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // ── Hangup ──────────────────────────────────────
 
     const handleHangup = useCallback(() => {
+        // 挂断时收掉原生浮窗（安卓壳里）
+        stopShellCallOverlay();
         setCallState("ENDED");
 
         // Stop any ongoing STT
@@ -725,6 +775,61 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd]);
 
+    // 通话屏卸载（挂断收尾、切会话、整页刷新）时务必收掉原生浮窗，
+    // 否则会在桌面上留一个再也点不动的悬空小窗。
+    useEffect(() => {
+        if (!shellOverlaySupported) return;
+        return () => { stopShellCallOverlay(); };
+    }, [shellOverlaySupported]);
+
+    // 原生浮窗事件回灌：时长、快捷回复、回到全屏、挂断。
+    // 必须放在 handleHangup 之后——它引用了这个 useCallback，位置提前会在
+    // 渲染时撞上 const 的暂时性死区直接抛错。
+    useEffect(() => {
+        if (!shellOverlaySupported) return;
+        ensureShellOverlayListener();
+        return subscribeShellOverlayEvents((event) => {
+            // 只认当前这一通的事件，换通话后旧事件丢弃
+            if (event.callId && event.callId !== shellCallIdRef.current) return;
+            switch (event.action) {
+                case "reply": {
+                    const text = (event.text || "").trim();
+                    if (!text) return;
+                    // 与界面里手动输入完全同一条通路：会落聊天记录、触发角色回复与 TTS
+                    if (stateRef.current === "IDLE") void runConversationTurn(text);
+                    return;
+                }
+                case "tick": {
+                    // 原生计时接管：页面在后台被冻结时，以原生的秒数为准
+                    if (typeof event.seconds === "number" && event.seconds >= 0) {
+                        callStartRef.current = Date.now() - event.seconds * 1000;
+                        setCallDuration(event.seconds);
+                    }
+                    return;
+                }
+                case "restore":
+                    onRestore?.();
+                    return;
+                case "hangup":
+                    hangupRef.current();
+                    return;
+                default:
+                    return;
+            }
+        });
+    }, [shellOverlaySupported, runConversationTurn, onRestore]);
+
+    // 保持 ref 指向最新的 handleHangup
+    useEffect(() => { hangupRef.current = handleHangup; }, [handleHangup]);
+
+    // 浮窗权限未开时的引导条
+    useEffect(() => {
+        if (!showOverlayHint) return;
+        const done = () => setShowOverlayHint(false);
+        const timer = window.setTimeout(done, 12000);
+        return () => window.clearTimeout(timer);
+    }, [showOverlayHint]);
+
     // ── Render ──────────────────────────────────────
 
     if (minimized) {
@@ -732,7 +837,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             <CallMiniWindow
                 imageUrl={bgImageResolved || character.avatar || null}
                 title={character.name}
-                meta={["语音通话", formatTime(callDuration)]}
+                meta={[callState === "ENDED" ? "通话已结束" : "语音通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的语音通话`}
                 onRestore={onRestore}
             />
@@ -751,6 +856,23 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             />
 
             <CallVolumeControl />
+
+            {/* 浮窗权限未开：切出去时给一条引导（只在壳里、且确实触发过时出现） */}
+            {showOverlayHint && isShellEnvironment() && (
+                <div
+                    role="button"
+                    onClick={() => { requestOverlayPermission(); setShowOverlayHint(false); }}
+                    style={{
+                        position: "absolute", top: 100, left: 12, right: 12, zIndex: 40,
+                        padding: "9px 12px", borderRadius: 12,
+                        background: "rgba(20,20,26,0.88)", backdropFilter: "blur(10px)",
+                        color: "#fff", fontSize: 12, lineHeight: 1.5, cursor: "pointer",
+                        boxShadow: "0 6px 20px rgba(0,0,0,0.35)",
+                    }}
+                >
+                    切到其他 App 时会挂一个通话浮窗。首次使用需开启「显示在其他应用上层」权限，点这里去开。
+                </div>
+            )}
 
             {onMinimize && callState !== "ENDED" && (
                 <button

@@ -29,6 +29,11 @@ export type CallAutoChatConfig = {
     maxTurns: number;
 };
 
+/** 原生计时事件（安卓壳浮窗每秒推一次）。
+ *  后台 WebView 的 setInterval 会被系统节流甚至冻结，靠它把通话时长与自动搭话
+ *  的节拍托管给原生，切到别的 App 后依然准点。 */
+export const SHELL_CALL_TICK_EVENT = "shell-call-overlay";
+
 export const DEFAULT_CALL_AUTO_CHAT_CONFIG: CallAutoChatConfig = {
     enabled: true,
     minSeconds: 20,

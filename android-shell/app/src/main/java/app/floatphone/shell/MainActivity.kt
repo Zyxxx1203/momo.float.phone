@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.3"
+        const val VERSION = "1.0.4"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -213,6 +213,9 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
 
         webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        // 登记给 ShellBus：浮窗服务/无障碍服务要把事件投回页面，需要这个引用。
+        // WebView 只能在主线程访问，投递时由 ShellBus 统一 post 到主线程。
+        ShellBus.webView = webView
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -422,6 +425,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (ShellBus.webView === webView) ShellBus.webView = null
         CookieManager.getInstance().flush()
         webView.destroy()
         super.onDestroy()
@@ -488,6 +492,72 @@ class MainActivity : AppCompatActivity() {
             (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
             true
         }.getOrDefault(false)
+
+        // ── 通话浮窗 ──────────────────────────────
+
+        /**
+         * 开一个原生通话浮窗（浮在其他 App 上层）。
+         *
+         * 网页侧在通话开始/缩小时调用；参数是渲染所需的全部信息：
+         * @param name   角色名
+         * @param avatar 头像：data:image/... 内联或 http(s) 直链，空则纯色底
+         * @param meta   底部信息（如「语音通话 · 00:12」，换行分段）
+         * @param callId 本次通话 id，随事件回传，供网页校验是不是同一通电话
+         * @return 是否已具备浮窗权限；false 时网页应引导用户去授权
+         */
+        @JavascriptInterface
+        fun startCallOverlay(name: String, avatar: String, meta: String, callId: String): Boolean {
+            val allowed = CallOverlayService.canDraw(this@MainActivity)
+            runCatching {
+                CallOverlayService.start(this@MainActivity, name, avatar, meta, callId)
+            }
+            return allowed
+        }
+
+        /** 更新浮窗显示（改名/换头像/刷新时长），不重建窗口。 */
+        @JavascriptInterface
+        fun updateCallOverlay(name: String, avatar: String, meta: String) {
+            runCatching { CallOverlayService.update(this@MainActivity, name, avatar, meta) }
+        }
+
+        /** 收掉浮窗（挂断或退回全屏时调用）。 */
+        @JavascriptInterface
+        fun stopCallOverlay() {
+            runCatching { CallOverlayService.stop(this@MainActivity) }
+        }
+
+        /** 浮窗权限是否已授予。 */
+        @JavascriptInterface
+        fun canDrawOverlay(): Boolean = CallOverlayService.canDraw(this@MainActivity)
+
+        /** 跳到系统的「显示在其他应用上层」授权页。 */
+        @JavascriptInterface
+        fun requestOverlayPermission() {
+            if (Build.VERSION.SDK_INT < 23) return
+            runCatching {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
+
+        /** 无障碍服务是否已开启。 */
+        @JavascriptInterface
+        fun isAccessibilityConnected(): Boolean = CallControlService.connected
+
+        /** 跳到系统「无障碍」设置页，引导用户开启通话控制服务。 */
+        @JavascriptInterface
+        fun openAccessibilitySettings() {
+            runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
 
         /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
         @JavascriptInterface

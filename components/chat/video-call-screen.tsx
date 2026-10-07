@@ -24,6 +24,8 @@ import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
+import { useShellCallOverlay } from "./use-shell-call-overlay";
+import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
 
@@ -108,12 +110,15 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const cameraEnabledRef = useRef<boolean>(false);
     const videoElRef = useRef<HTMLVideoElement | null>(null);
     const isSpeakerMutedRef = useRef<boolean>(false);
+    // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
+    const callDurationRef = useRef(0);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
     const userNameRef = useRef<string>(_initUi?.name || "你");
     const userAvatarRef = useRef<string | null>(resolveChatUserAvatar(session, _initUi?.avatarUrl) || null);
 
     useEffect(() => { stateRef.current = callState; }, [callState]);
     useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
+    useEffect(() => { callDurationRef.current = callDuration; }, [callDuration]);
 
     // 缩小为悬浮窗：通话继续，不再「冻结」。
     //
@@ -604,6 +609,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     // ── Hangup ──────────────────────────────────────
 
     const handleHangup = useCallback(() => {
+        // 挂断时收掉安卓壳的原生浮窗
+        stopShellCallOverlay();
         setCallState("ENDED");
         if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
         if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
@@ -618,6 +625,30 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         messagesRef.current = [...messagesRef.current, endMsg];
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd, stopCameraStream]);
+
+    // 安卓壳原生浮窗：切到别的 App 时挂一个能浮在上层的小窗。
+    // 三个通话屏共用同一个 hook；放在 handleHangup 之后，避免 const 的暂时性死区。
+    useShellCallOverlay({
+        active: callState !== "ENDED" && callState !== "CONNECTING",
+        label: "视频通话",
+        name: character.name,
+        avatar: bgImageResolved || character.avatar || null,
+        getDuration: () => callDurationRef.current,
+        onReply: (text) => {
+            // 与界面里手动输入走同一条通路：会落聊天记录、触发角色回复与 TTS
+            if (stateRef.current === "IDLE") void runConversationTurn(text);
+        },
+        onHangup: () => handleHangup(),
+        onRestore,
+        onTick: (seconds) => {
+            // 只前进、不后退：避免时长来回跳、挂断写进记录的时长跟着乱
+            if (seconds > callDurationRef.current) {
+                callStartRef.current = Date.now() - seconds * 1000;
+                callDurationRef.current = seconds;
+                setCallDuration(seconds);
+            }
+        },
+    });
 
     // 通话音频会话 + 卸载兜底：不经挂断键退出时释放识别与在途播放，
     // 防止识别自动重启循环在后台无限自我重启、麦克风永不归还（详见 voice-call-screen）。

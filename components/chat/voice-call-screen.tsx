@@ -25,7 +25,7 @@ import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
 import { type CallAutoChatConfig, MAX_TURNS_LIMIT, MIN_INTERVAL_SECONDS, loadCallAutoChatConfig, randomAutoChatDelaySeconds, saveCallAutoChatConfig } from "@/lib/call-auto-chat";
-import { ensureShellOverlayListener, isShellEnvironment, requestOverlayPermission, startShellCallOverlay, stopShellCallOverlay, subscribeShellOverlayEvents, supportsCallOverlay } from "@/lib/shell-call-overlay";
+import { ensureShellOverlayListener, isShellEnvironment, requestOverlayPermission, startShellCallOverlay, stopShellCallOverlay, subscribeShellOverlayEvents, supportsCallOverlay, updateShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
 

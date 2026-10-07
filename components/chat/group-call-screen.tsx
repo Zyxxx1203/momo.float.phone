@@ -21,6 +21,8 @@ import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
+import { useShellCallOverlay } from "./use-shell-call-overlay";
+import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
 
@@ -94,6 +96,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     const callStartRef = useRef<number>(0);
     const stateRef = useRef<string>("CONNECTING");
     const interimTextRef = useRef<string>("");
+    // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
+    const callDurationRef = useRef(0);
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const userNameRef = useRef<string>("你");
@@ -142,6 +146,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
     // Keep refs in sync
     useEffect(() => { stateRef.current = callState; }, [callState]);
+    useEffect(() => { callDurationRef.current = callDuration; }, [callDuration]);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
     // + 来电/致电铃声与挂断音（角色专属提示音优先，其余在"全局聊天信息 → 提示音"）
@@ -426,6 +431,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
 
     // ── Hangup ──────────────────────────────────────
     const handleHangup = useCallback(() => {
+        // 挂断时收掉安卓壳的原生浮窗
+        stopShellCallOverlay();
         setCallState("ENDED");
         if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
         if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
@@ -450,6 +457,30 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             setCallAudioSessionActive(false);
         };
     }, []);
+
+    // 安卓壳原生浮窗：切到别的 App 时挂一个能浮在上层的小窗。
+    // 三个通话屏共用同一个 hook；放在 handleHangup 之后，避免 const 的暂时性死区。
+    useShellCallOverlay({
+        active: callState !== "ENDED" && callState !== "CONNECTING",
+        label: `群${callTypeLabel} (${characters.length + 1}人)`,
+        name: `群${callTypeLabel}`,
+        avatar: voiceBgResolved || resolvedBgs[characters[0]?.id || ""] || characters[0]?.avatar || null,
+        getDuration: () => callDurationRef.current,
+        onReply: (text) => {
+            // 与界面里手动输入走同一条通路：会落聊天记录、触发角色回复与 TTS
+            if (stateRef.current === "IDLE") void runConversationTurn(text);
+        },
+        onHangup: () => handleHangup(),
+        onRestore,
+        onTick: (seconds) => {
+            // 只前进、不后退：避免时长来回跳、挂断写进记录的时长跟着乱
+            if (seconds > callDurationRef.current) {
+                callStartRef.current = Date.now() - seconds * 1000;
+                callDurationRef.current = seconds;
+                setCallDuration(seconds);
+            }
+        },
+    });
 
     // ── Control buttons (shared between voice and video) ──
     const renderTextInputPanel = (floating = false) => {

@@ -236,21 +236,33 @@ class CallOverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                // 通话一接通就在前台把服务暖好：窗口建出来但先藏着，切后台再亮。
+                //
+                // 为什么不是等到切出去再建：Android 12+ 禁止 App 从后台启动前台服务，
+                // 而「用户切到别的 App」那一刻，本 App 恰好就在后台。过去直接在那时
+                // startForegroundService，被系统拒绝、异常又被静默吞掉，浮窗就再也
+                // 弹不出来（声音照旧，因为放音是 WebView 的事，不依赖浮窗）。
                 charName = intent.getStringExtra(EXTRA_NAME).orEmpty()
                 avatarUrl = intent.getStringExtra(EXTRA_AVATAR).orEmpty()
                 metaText = intent.getStringExtra(EXTRA_META).orEmpty()
                 currentCallId = intent.getStringExtra(EXTRA_CALL_ID).orEmpty()
                 running = true
                 stopped = false
+                // 登记实例：主题改动时要靠它把已弹出的回复条就地重绘
+                liveInstance = this
                 setElapsedBase(intent.getIntExtra(EXTRA_ELAPSED, 0))
-                showOverlay()
+                showOverlay(visible = false)
                 startHeartbeat()
             }
             ACTION_SHOW -> {
-                showOverlay()
+                // 切到后台：把预热好的窗口亮出来（服务早已在前台运行，
+                // 这里只是改可见性，不涉及「后台启动前台服务」的限制）
+                showOverlay(visible = true)
             }
             ACTION_HIDE -> {
+                // 回到前台：只把窗口藏起来，服务继续跑，计时与自动搭话不断
                 rootView?.visibility = View.GONE
+                removeReplyBar()
             }
             ACTION_UPDATE -> {
                 val name = intent.getStringExtra(EXTRA_NAME).orEmpty()
@@ -316,6 +328,9 @@ class CallOverlayService : Service() {
      * 页面已不可用（WebView 已销毁）时不再空转。
      */
     private fun startHeartbeat() {
+        // 已在跑就不再起第二条：浮窗被反复 START 时，每来一次都新起线程的话，
+        // 旧线程因为 stopped 被置回 false 而不会退出，心跳线程会越积越多。
+        if (heartbeat?.isAlive == true) return
         heartbeat = Thread {
             while (!stopped && !Thread.currentThread().isInterrupted) {
                 try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
@@ -457,7 +472,13 @@ class CallOverlayService : Service() {
         runCatching { windowManager.updateViewLayout(view, params) }
     }
 
-    private fun showOverlay() {
+    /**
+     * 把浮窗挂到屏幕上。
+     *
+     * visible=false 时窗口建出来但先藏着——这是通话接通时的「预热」：此时 App 还在
+     * 前台，启动前台服务不会被系统拒绝；等真正切到后台再 showOverlay(true) 亮出来。
+     */
+    private fun showOverlay(visible: Boolean = true) {
         if (!canDraw(this)) {
             // 没拿到浮窗权限：通知照常有（点它能回通话页），并告诉网页弹引导
             updateNotification()

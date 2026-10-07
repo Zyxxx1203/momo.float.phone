@@ -506,18 +506,18 @@ class MainActivity : AppCompatActivity() {
          * @return 是否已具备浮窗权限；false 时网页应引导用户去授权
          */
         @JavascriptInterface
-        fun startCallOverlay(name: String, avatar: String, meta: String, callId: String): Boolean {
+        fun startCallOverlay(name: String, avatar: String, meta: String, callId: String, elapsedSeconds: Int): Boolean {
             val allowed = CallOverlayService.canDraw(this@MainActivity)
             runCatching {
-                CallOverlayService.start(this@MainActivity, name, avatar, meta, callId)
+                CallOverlayService.start(this@MainActivity, name, avatar, meta, callId, elapsedSeconds)
             }
             return allowed
         }
 
         /** 更新浮窗显示（改名/换头像/刷新时长），不重建窗口。 */
         @JavascriptInterface
-        fun updateCallOverlay(name: String, avatar: String, meta: String) {
-            runCatching { CallOverlayService.update(this@MainActivity, name, avatar, meta) }
+        fun updateCallOverlay(name: String, avatar: String, meta: String, elapsedSeconds: Int) {
+            runCatching { CallOverlayService.update(this@MainActivity, name, avatar, meta, elapsedSeconds) }
         }
 
         /** 收掉浮窗（挂断或退回全屏时调用）。 */

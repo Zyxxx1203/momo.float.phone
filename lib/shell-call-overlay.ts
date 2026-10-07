@@ -20,8 +20,8 @@ type ShellBridgeLike = {
     getVersion?: () => string;
     canDrawOverlay?: () => boolean;
     requestOverlayPermission?: () => void;
-    startCallOverlay?: (name: string, avatar: string, meta: string, callId: string) => boolean;
-    updateCallOverlay?: (name: string, avatar: string, meta: string) => void;
+    startCallOverlay?: (name: string, avatar: string, meta: string, callId: string, elapsedSeconds: number) => boolean;
+    updateCallOverlay?: (name: string, avatar: string, meta: string, elapsedSeconds: number) => void;
     stopCallOverlay?: () => void;
     isAccessibilityConnected?: () => boolean;
     openAccessibilitySettings?: () => void;
@@ -88,6 +88,9 @@ export function startShellCallOverlay(params: {
     avatar?: string | null;
     meta?: string[];
     callId: string;
+    /** 网页侧已通话秒数。浮窗是切到后台才建的，必须带上基准，
+     *  否则原生从 0 起数，和网页计时两套并行、时长对不上。 */
+    elapsedSeconds?: number;
 }): boolean {
     const b = bridge();
     if (!b?.startCallOverlay) return false;
@@ -97,6 +100,7 @@ export function startShellCallOverlay(params: {
             params.avatar || "",
             (params.meta ?? []).join("\n"),
             params.callId,
+            Math.max(0, Math.floor(params.elapsedSeconds ?? 0)),
         );
     } catch {
         return false;
@@ -108,11 +112,17 @@ export function updateShellCallOverlay(params: {
     name: string;
     avatar?: string | null;
     meta?: string[];
+    elapsedSeconds?: number;
 }): void {
     const b = bridge();
     if (!b?.updateCallOverlay) return;
     try {
-        b.updateCallOverlay(params.name, params.avatar || "", (params.meta ?? []).join("\n"));
+        b.updateCallOverlay(
+            params.name,
+            params.avatar || "",
+            (params.meta ?? []).join("\n"),
+            Math.max(0, Math.floor(params.elapsedSeconds ?? 0)),
+        );
     } catch {
         /* 浮窗不在或 WebView 已销毁，忽略 */
     }

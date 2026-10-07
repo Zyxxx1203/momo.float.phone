@@ -65,6 +65,8 @@ class CallOverlayService : Service() {
         const val EXTRA_AVATAR = "avatar"
         const val EXTRA_META = "meta"
         const val EXTRA_CALL_ID = "call_id"
+        /** 网页传来的「已通话秒数」——浮窗是切出去才建的，不能从 0 自己数 */
+        const val EXTRA_ELAPSED = "elapsed"
 
         private const val MIN_W_DP = 88
         private const val MIN_H_DP = 120
@@ -77,19 +79,20 @@ class CallOverlayService : Service() {
         @Volatile
         private var running = false
 
-        fun start(context: Context, name: String, avatar: String, meta: String, callId: String) {
+        fun start(context: Context, name: String, avatar: String, meta: String, callId: String, elapsedSeconds: Int) {
             val intent = Intent(context, CallOverlayService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_NAME, name)
                 putExtra(EXTRA_AVATAR, avatar)
                 putExtra(EXTRA_META, meta)
                 putExtra(EXTRA_CALL_ID, callId)
+                putExtra(EXTRA_ELAPSED, elapsedSeconds)
             }
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
             else context.startService(intent)
         }
 
-        fun update(context: Context, name: String, avatar: String, meta: String) {
+        fun update(context: Context, name: String, avatar: String, meta: String, elapsedSeconds: Int) {
             if (!running) return
             runCatching {
                 context.startService(Intent(context, CallOverlayService::class.java).apply {
@@ -97,6 +100,7 @@ class CallOverlayService : Service() {
                     putExtra(EXTRA_NAME, name)
                     putExtra(EXTRA_AVATAR, avatar)
                     putExtra(EXTRA_META, meta)
+                    putExtra(EXTRA_ELAPSED, elapsedSeconds)
                 })
             }
         }
@@ -121,7 +125,10 @@ class CallOverlayService : Service() {
     private var metaText = ""
     private var currentCallId = ""
 
-    private var elapsedSeconds = 0
+    // 时长基准：网页把「已通话秒数」传进来，这里记下基准点，之后按墙钟推算。
+    // 不自己从 0 开始数——浮窗是切到后台才创建的，从头数会和网页计时对不上。
+    private var baseSeconds: Int = 0
+    private var baseAtMillis: Long = 0L
     private var heartbeat: Thread? = null
     @Volatile private var stopped = false
 
@@ -151,7 +158,7 @@ class CallOverlayService : Service() {
                 currentCallId = intent.getStringExtra(EXTRA_CALL_ID).orEmpty()
                 running = true
                 stopped = false
-                elapsedSeconds = 0
+                setElapsedBase(intent.getIntExtra(EXTRA_ELAPSED, 0))
                 showOverlay()
                 startHeartbeat()
             }
@@ -161,6 +168,9 @@ class CallOverlayService : Service() {
                 val avatar = intent.getStringExtra(EXTRA_AVATAR).orEmpty()
                 charName = name
                 metaText = meta
+                // 页面在后台冻结时它对时长的认知会滞后；每次更新顺带校准基准，
+                // 保证「通话记录里的时长」与浮窗显示的是同一个数。
+                if (intent.hasExtra(EXTRA_ELAPSED)) setElapsedBase(intent.getIntExtra(EXTRA_ELAPSED, 0))
                 if (avatar != avatarUrl) {
                     avatarUrl = avatar
                     refreshAvatarAsync()
@@ -180,11 +190,23 @@ class CallOverlayService : Service() {
         super.onDestroy()
     }
 
+    /** 记下时长基准：从现在起，已通话秒数 = base + 经过的墙钟时间。 */
+    private fun setElapsedBase(seconds: Int) {
+        baseSeconds = seconds.coerceAtLeast(0)
+        baseAtMillis = System.currentTimeMillis()
+    }
+
+    /** 当前已通话秒数（按墙钟推算，不依赖心跳是否准点）。 */
+    private fun currentElapsed(): Int = runCatching {
+        baseSeconds + ((System.currentTimeMillis() - baseAtMillis) / 1000L).toInt()
+    }.getOrDefault(baseSeconds)
+
     private fun teardown() {
         stopped = true
         running = false
         heartbeat?.interrupt()
         heartbeat = null
+        removeReplyBar()
         rootView?.let { view -> runCatching { windowManager.removeView(view) } }
         rootView = null
         stopForeground(true)
@@ -201,13 +223,13 @@ class CallOverlayService : Service() {
             while (!stopped && !Thread.currentThread().isInterrupted) {
                 try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
                 if (stopped) break
-                elapsedSeconds += 1
-                // 时长由原生自己维护并刷新：网页被系统冻结时也照常走秒，不依赖回调
+                val elapsed = currentElapsed()
+                // 时长由原生维护并刷新：网页被系统冻结时也照常走秒，不依赖回调
                 main.post { renderMeta() }
                 if (!ShellBus.isWebAlive()) continue
                 ShellBus.dispatchOverlayEvent(
                     "tick",
-                    JSONObject().put("seconds", elapsedSeconds).put("callId", currentCallId),
+                    JSONObject().put("seconds", elapsed).put("callId", currentCallId),
                 )
             }
         }.also { it.name = "call-overlay-heartbeat"; it.start() }
@@ -256,8 +278,12 @@ class CallOverlayService : Service() {
     private var bgImage: ImageView? = null
     private var nameView: TextView? = null
     private var metaView: TextView? = null
-    private var replyBox: LinearLayout? = null
+    /** 独立的快捷回复条（另一个 WindowManager 窗口，不与小窗共用） */
+    private var replyWindow: View? = null
     private var replyInput: EditText? = null
+    /** 回复条自己的位置（可拖动），与通话小窗各记各的 */
+    private var replyBarX = 0
+    private var replyBarY = 0
 
     private var widthPx = 0
     private var heightPx = 0
@@ -357,10 +383,15 @@ class CallOverlayService : Service() {
     private fun buildContentView(layout: FrameLayout) {
         layout.removeAllViews()
 
+        // 注意：底图不要挂 setOnClickListener。
+        // ImageView 可点击时会消费触摸事件，父容器（浮窗根布局）的拖动监听
+        // 就永远收不到 DOWN/MOVE，表现为「只能缩放、拖不动，一按还跳回 App」。
+        // 「轻点回前台」的判定统一放进 attachDrag 的抬手逻辑里。
         bgImage = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             setBackgroundColor(Color.parseColor("#1B1B22"))
-            setOnClickListener { bringAppToFront() }
+            isClickable = false
+            isFocusable = false
         }
         layout.addView(bgImage, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -421,43 +452,9 @@ class CallOverlayService : Service() {
         })
         attachResize(handle, layout)
 
-        // 快捷回复框：默认隐藏，长按浮窗弹出
-        replyBox = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.parseColor("#F21B1B22"))
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-            visibility = View.GONE
-        }
-        replyInput = EditText(this).apply {
-            hint = "说点什么…"
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.parseColor("#8A93A6"))
-            textSize = 13f
-            maxLines = 2
-            background = null
-        }
-        val send = Button(this).apply {
-            text = "发送"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            background = GradientDrawable().apply {
-                cornerRadius = dp(8).toFloat()
-                setColor(Color.parseColor("#3B82F6"))
-            }
-            setPadding(dp(12), 0, dp(12), 0)
-            setOnClickListener { submitReply() }
-        }
-        replyBox?.addView(replyInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        replyBox?.addView(send, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        ))
-        layout.addView(replyBox, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM,
-        ))
+        // 快捷回复条不放在小窗里，而是长按时另开一个独立的窄条窗口（见 openReplyBar）。
+        // 原因：小窗最窄只有 88dp，塞一个输入框进去字都看不清；独立窗口还能
+        // 单独申请输入焦点、唤起键盘，也能各自记忆拖到的位置。
 
         attachDrag(layout)
     }
@@ -481,8 +478,9 @@ class CallOverlayService : Service() {
 
     /** 把 {{time}} 占位替换成原生计时，网页只需在 meta 里写 {{time}} */
     private fun renderMeta() {
-        val minutes = elapsedSeconds / 60
-        val seconds = elapsedSeconds % 60
+        val total = currentElapsed()
+        val minutes = total / 60
+        val seconds = total % 60
         val stamp = "%02d:%02d".format(minutes, seconds)
         metaView?.text = metaText.replace("{{time}}", stamp)
     }
@@ -543,7 +541,14 @@ class CallOverlayService : Service() {
         var originX = 0
         var originY = 0
         var moved = false
-        var downAt = 0L
+        var longPressFired = false
+
+        // 长按用延时任务判定，而不是抬手时看按住时长：
+        // 这样按住约半秒就立刻弹出输入条，不用等手指抬起。
+        val longPressRunnable = Runnable {
+            longPressFired = true
+            openReplyBar()
+        }
 
         layout.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -553,13 +558,18 @@ class CallOverlayService : Service() {
                     originX = posX
                     originY = posY
                     moved = false
-                    downAt = System.currentTimeMillis()
+                    longPressFired = false
+                    main.postDelayed(longPressRunnable, 480)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - downX
                     val dy = event.rawY - downY
-                    if (!moved && Math.abs(dx) + Math.abs(dy) > dp(5)) moved = true
+                    if (!moved && Math.abs(dx) + Math.abs(dy) > dp(5)) {
+                        moved = true
+                        // 一旦移动就取消长按：拖动时不该弹出输入条
+                        main.removeCallbacks(longPressRunnable)
+                    }
                     if (moved) {
                         posX = originX + dx.toInt()
                         posY = originY + dy.toInt()
@@ -569,11 +579,12 @@ class CallOverlayService : Service() {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    main.removeCallbacks(longPressRunnable)
                     if (moved) {
                         saveGeometry()
-                    } else if (!moved && System.currentTimeMillis() - downAt > 450) {
-                        // 长按：弹出快捷回复框（不跳回 App 也能回话）
-                        toggleReplyBox()
+                    } else if (!longPressFired) {
+                        // 既没拖动也没长按 = 轻点：才回前台
+                        bringAppToFront()
                     }
                     true
                 }
@@ -613,24 +624,176 @@ class CallOverlayService : Service() {
         }
     }
 
-    // ── 快捷回复 ──
+    // ── 快捷回复（独立窄条窗口，可拖动） ──
 
-    private fun toggleReplyBox() {
-        val box = replyBox ?: return
-        if (box.visibility == View.VISIBLE) {
-            box.visibility = View.GONE
-        } else {
-            box.visibility = View.VISIBLE
+    /**
+     * 长按浮窗时弹出：一个独立的输入条，发完自动收起。
+     *
+     * 单独开窗口而不是塞进小窗，是为了四件事：
+     * 1. 小窗最窄只有 88dp，输入框塞进去字看不见；
+     * 2. 独立窗口可以申请输入焦点并唤起键盘（小窗是 FLAG_NOT_FOCUSABLE）；
+     * 3. 只占一条宽度，不遮挡用户正在看的别的内容；
+     * 4. 可以自己记住被拖到的位置，和通话小窗互不干扰。
+     */
+    private fun openReplyBar() {
+        val existing = replyWindow
+        if (existing != null) {
+            existing.visibility = View.VISIBLE
             replyInput?.requestFocus()
+            showIme(replyInput)
+            return
+        }
+
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val barHeight = dp(56)
+        val screenH = resources.displayMetrics.heightPixels
+        val screenW = resources.displayMetrics.widthPixels
+        replyBarX = prefs.getInt("reply_x", 0)
+        replyBarY = prefs.getInt("reply_y", screenH - barHeight - dp(90))
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#F21B1B22"))
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        replyInput = EditText(this).apply {
+            hint = "说点什么…"
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#8A93A6"))
+            textSize = 14f
+            maxLines = 1
+            background = null
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                    submitReply()
+                    true
+                } else false
+            }
+        }
+        val send = Button(this).apply {
+            text = "发送"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(Color.parseColor("#3B82F6"))
+            }
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setOnClickListener { submitReply() }
+        }
+        val close = Button(this).apply {
+            text = "收起"
+            textSize = 13f
+            setTextColor(Color.parseColor("#C9D1E0"))
+            background = null
+            setOnClickListener { removeReplyBar() }
+        }
+        bar.addView(replyInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(send, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+        bar.addView(close, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ))
+
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        // 要能打字，就不能带 FLAG_NOT_FOCUSABLE；
+        // 带 FLAG_NOT_TOUCH_MODAL 则点到条外不会传给本窗口，别处照常可点。
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            android.graphics.PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = replyBarX
+            y = replyBarY
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
+        }
+
+        // 拖动：按住条身移动。返回 false 让子控件（输入框/按钮）照常拿到事件，
+        // 否则输入框没法选中文字、移动光标。
+        var barDownX = 0f
+        var barDownY = 0f
+        var barOriginX = 0
+        var barOriginY = 0
+        var barMoved = false
+        bar.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    barDownX = event.rawX
+                    barDownY = event.rawY
+                    barOriginX = replyBarX
+                    barOriginY = replyBarY
+                    barMoved = false
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - barDownX
+                    val dy = event.rawY - barDownY
+                    if (!barMoved && Math.abs(dx) + Math.abs(dy) > dp(5)) barMoved = true
+                    if (barMoved) {
+                        replyBarX = (barOriginX + dx.toInt()).coerceIn(0, maxOf(0, screenW - dp(60)))
+                        replyBarY = (barOriginY + dy.toInt()).coerceIn(0, maxOf(0, screenH - barHeight))
+                        params.x = replyBarX
+                        params.y = replyBarY
+                        runCatching { windowManager.updateViewLayout(bar, params) }
+                    }
+                    barMoved
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (barMoved) {
+                        runCatching {
+                            prefs.edit().putInt("reply_x", replyBarX).putInt("reply_y", replyBarY).apply()
+                        }
+                    }
+                    barMoved
+                }
+                else -> false
+            }
+        }
+
+        main.post {
+            runCatching {
+                windowManager.addView(bar, params)
+                replyWindow = bar
+                replyInput?.requestFocus()
+                showIme(replyInput)
+            }
         }
     }
 
+    /** 移除回复条（隐藏并释放窗口） */
+    private fun removeReplyBar() {
+        val view = replyWindow ?: return
+        replyWindow = null
+        replyInput = null
+        main.post { runCatching { windowManager.removeView(view) } }
+    }
+
+    private fun showIme(target: EditText?) {
+        val view = target ?: return
+        runCatching {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(view, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    /** 发送后自动收起输入条——用户要的就是「发完就消失，不占屏幕」。 */
     private fun submitReply() {
         val text = replyInput?.text?.toString()?.trim().orEmpty()
         if (text.isEmpty()) return
-        replyInput?.setText("")
-        replyBox?.visibility = View.GONE
         // 送给网页，按「用户发言」走一趟正常对话轮（会落聊天记录、触发角色回复）
         ShellBus.dispatchOverlayEvent("reply", JSONObject().put("text", text).put("callId", currentCallId))
+        removeReplyBar()
     }
 }

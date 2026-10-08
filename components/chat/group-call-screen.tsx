@@ -242,6 +242,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
             autoChatNotifyRef.current?.userSpoke();
             const userMsg = pushChatMessage({
                 sessionId: session.id, role: "user", content: userText,
+                // 标记来源为通话：折叠只收这类消息
+                origin: "call",
             });
             messagesRef.current = [...messagesRef.current, userMsg];
             setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
@@ -273,6 +275,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 const aiMsg = pushChatMessage({
                     sessionId: session.id, role: "assistant",
                     content: displayText,
+                    // 标记来源为通话：折叠只收这类消息
+                    origin: "call",
                     statusPanel: statusPanel || undefined,
                     // 自定义状态栏渲染戳：不盖的话 custom 模式下 [状态栏] 原文按 markdown 渲染
                     statusRegionMode: statusPanel && isCustomStatusRegionActive(getStatusRegionConfig(session.id, false))

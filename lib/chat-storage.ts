@@ -139,7 +139,14 @@ export type ChatMessage = {
         | "group_admin_notice"
         | "media_file"
         | `plugin:${string}`; // 聊天插件自定义消息类型（由注册该 kind 的插件渲染气泡）
-    origin?: "chat" | "reading_discuss" | "custom_app" | "custom_app_background" | "story_floating_phone";
+    /**
+     * 消息来源。call = 通话屏产生的消息（通话中的对话轮、用户从通话界面发的）。
+     *
+     * 用途：通话折叠需要区分「通话产生的」与「聊天室发的」——前者收进折叠条，
+     * 后者留在时间流里正常显示。此前没有这个区分，折叠按时间区间无差别全收，
+     * 于是通话期间在聊天室发的消息、卡片也被一起折进去了（用户实报）。
+     */
+    origin?: "chat" | "reading_discuss" | "custom_app" | "custom_app_background" | "story_floating_phone" | "call";
     mediaUrl?: string;
     mediaData?: {
         amount?: number;          // 红包/转账金额

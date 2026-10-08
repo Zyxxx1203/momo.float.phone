@@ -412,6 +412,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 statusRegionMode,
                 innerMonologue, stateValues: stateValues.length > 0 ? stateValues : undefined,
                 freshStateValues,
+                origin: "call",
             });
             messagesRef.current = [...messagesRef.current, aiMsg];
         } else {
@@ -420,6 +421,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     sessionId: session.id, role: "assistant", content: part.content,
                     mediaType: part.mediaType,
                     mediaData: part.mediaData,
+                    // 标记来源为通话：折叠只收这类消息
+                    origin: "call",
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
                     statusRegionMode: idx === 0 && statusPanel ? statusRegionMode : undefined,
                     innerMonologue: idx === 0 && innerMonologue ? innerMonologue : undefined,
@@ -443,7 +446,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         if (userText) {
             // 用户开口：自动搭话重新计数（上限按「你开口后」重新算）
             autoChatNotifyRef.current?.userSpoke();
-            const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText });
+            const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText, origin: "call" });
             messagesRef.current = [...messagesRef.current, userMsg];
             setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
         }

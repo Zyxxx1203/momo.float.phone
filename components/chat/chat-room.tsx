@@ -5463,7 +5463,14 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     if (c.includes(`挂断了${kw}`) || c.includes(`挂断了群${kw}`) || c.includes(`拒绝了${kw}`) || c.includes(`拒绝了群${kw}`) || c.includes(`取消了${kw}`) || c.includes(`取消了群${kw}`)) {
                         endIdx = j;
                         const match = c.match(/时长\s*(\d+:\d+)/);
-                        duration = match ? match[1] : "";
+                        // 时长有两个来源，正文正则优先、mediaData 兜底。
+                        //
+                        // 单聊挂断消息的正文只有「[我挂断了语音通话]」，时长实际存在
+                        // mediaData.callDuration 里（通话屏落库时写入）——过去只扫正文，
+                        // 于是单聊时长永远取不到（用户实报「没有显示时长」）。
+                        // 群聊挂断把时长写进了正文，正则仍能命中。
+                        const fromMedia = allStored[j].mediaData?.callDuration;
+                        duration = match ? match[1] : (typeof fromMedia === "string" ? fromMedia : "");
                         break;
                     }
                 }
@@ -5523,21 +5530,32 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 }
 
                 if (endIdx > i) {
+                    // 只收「通话产生的消息」：
+                    //   · origin === "call" —— 通话屏里的对话轮、用户从通话界面发的
+                    //   · isCallSysMsg      —— 通话留痕（发起了/挂断了）本身
+                    //
+                    // 通话期间在聊天室发的消息与卡片（origin 为 chat）不收，
+                    // 留在时间流里正常显示。此前折叠按时间区间无差别全收，
+                    // 于是这些消息也被藏进折叠条（用户实报）。
                     const memberIds = new Set<string>();
                     let chatCount = 0;
                     for (let k = i; k <= endIdx; k += 1) {
-                        memberIds.add(allStored[k].id);
-                        if (uiRole(allStored[k]) !== "system") chatCount += 1;
+                        const stored = allStored[k];
+                        if (stored.origin !== "call" && !isCallSysMsg(stored)) continue;
+                        memberIds.add(stored.id);
+                        if (uiRole(stored) !== "system") chatCount += 1;
                     }
-                    ranges.push({
-                        startMsgId: msg.id,
-                        endMsgId: allStored[endIdx].id,
-                        duration,
-                        callType,
-                        interrupted,
-                        chatCount,
-                        memberIds,
-                    });
+                    if (memberIds.size > 0) {
+                        ranges.push({
+                            startMsgId: msg.id,
+                            endMsgId: allStored[endIdx].id,
+                            duration,
+                            callType,
+                            interrupted,
+                            chatCount,
+                            memberIds,
+                        });
+                    }
                     i = endIdx + 1;
                     continue;
                 }
@@ -6049,9 +6067,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
                                         </svg>
                                     )}
-                                    {/* 条数常显：折叠条本身就是这段通话的入口，条数放在这里是
-                                        用户唯一能一眼看出「这段有多长」的地方——不显示等于信息丢失。 */}
-                                    <span>{vcGroup.callType === "video" ? "视频通话" : "语音通话"}{vcGroup.duration ? ` ${vcGroup.duration}` : ""} · {chatCount}条消息{vcGroup.interrupted ? " · 无结束记录" : ""}</span>
+                                    {/* 补偿显示：通话被聊天室消息切断后会分成多段，但每一段都要能
+                                        看出这通电话的全貌——否则用户从第 2 段开始看，就不知道
+                                        总共打了多久、聊了多少条了。全程总时长与总条数放在每段上，
+                                        段落编号用来表明「这是一通电话的第几段」。 */}
+                                    <span>
+                                        {vcGroup.callType === "video" ? "视频通话" : "语音通话"}
+                                        {vcGroup.duration ? ` · 全程${vcGroup.duration}` : ""}
+                                        {` · 共${vcGroup.totalChatCount}条`}
+                                        {vcGroup.segmentCount > 1 ? ` · 第${vcGroup.segmentIndex}/${vcGroup.segmentCount}段` : ""}
+                                        {vcGroup.interrupted ? " · 无结束记录" : ""}
+                                    </span>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                                         className="ui-chevron-down-flip" {...(isExpanded ? { "data-open": "" } : {})}>
                                         <polyline points="6 9 12 15 18 9" />

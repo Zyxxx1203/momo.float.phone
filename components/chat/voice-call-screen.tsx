@@ -410,6 +410,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 innerMonologue,
                 stateValues: stateValues.length > 0 ? stateValues : undefined,
                 freshStateValues,
+                origin: "call",
             });
             messagesRef.current = [...messagesRef.current, aiMsg];
             createdMessageIds.push(aiMsg.id);
@@ -421,6 +422,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     content: part.content,
                     mediaType: part.mediaType,
                     mediaData: part.mediaData,
+                    // 标记来源为通话：折叠只收这类消息
+                    origin: "call",
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
                     statusRegionMode: idx === 0 && statusPanel ? statusRegionMode : undefined,
                     innerMonologue: idx === 0 && innerMonologue ? innerMonologue : undefined,
@@ -471,6 +474,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 sessionId: session.id,
                 role: "user",
                 content: userText,
+                // 标记来源为通话：折叠只收这类消息，通话期间在聊天室发的留在时间流
+                origin: "call",
             });
             messagesRef.current = [...messagesRef.current, userMsg];
 

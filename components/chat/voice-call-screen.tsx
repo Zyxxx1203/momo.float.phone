@@ -434,6 +434,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             messagesRef.current = [...messagesRef.current, ...newMsgs];
             createdMessageIds.push(...newMsgs.map(m => m.id));
         }
+        window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
 
         // Return clean text parts for TTS (exclude rich media content)
         const cleanParts = chatParts
@@ -478,6 +479,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 origin: "call",
             });
             messagesRef.current = [...messagesRef.current, userMsg];
+            // 通知聊天室刷新：通话屏在聊天室之外（CallLayer），不广播的话
+            // 通话中落库的消息要等挂断（chat-call-ended）才会出现在聊天室里，
+            // 折叠条也就一直不更新（用户实报「要挂掉才同步」）。
+            window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
 
             // Add user subtitle
             setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText, messageIds: [userMsg.id] }]);

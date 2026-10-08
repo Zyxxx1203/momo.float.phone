@@ -448,6 +448,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             autoChatNotifyRef.current?.userSpoke();
             const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText, origin: "call" });
             messagesRef.current = [...messagesRef.current, userMsg];
+            // 通知聊天室刷新（通话屏在聊天室之外，不广播就要等挂断才同步）
+            window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
             setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
         }
         setCallState("PROCESSING");
@@ -643,6 +645,21 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         messagesRef.current = [...messagesRef.current, endMsg];
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd, stopCameraStream]);
+
+    // ── 待发送队列 ──
+    //
+    // 与语音通话屏同一套：角色正在说话/思考时，从浮窗回复条发来的消息先排队，
+    // 回到 IDLE 自动补发，不再「忙就丢掉」。
+    //
+    // 此前本文件只 import 了 useCallReplyQueue 却从未调用，replyQueue 根本没定义：
+    // 只要渲染到引用它的分支（缩成悬浮小窗、挂安卓壳原生浮窗）就抛
+    // ReferenceError，整个通话页白屏（用户实报）。这里补上定义。
+    const replyQueue = useCallReplyQueue({
+        callState,
+        callStateRef: stateRef,
+        runTurn: (text) => { void runConversationTurn(text); },
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+    });
 
     // 安卓壳原生浮窗：切到别的 App 时挂一个能浮在上层的小窗。
     // 三个通话屏共用同一个 hook；放在 handleHangup 之后，避免 const 的暂时性死区。

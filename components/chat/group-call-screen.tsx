@@ -246,6 +246,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                 origin: "call",
             });
             messagesRef.current = [...messagesRef.current, userMsg];
+            // 通知聊天室刷新（通话屏在聊天室之外，不广播就要等挂断才同步）
+            window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
             setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
         }
 
@@ -289,6 +291,7 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                     senderName: r.characterName,
                 });
                 messagesRef.current = [...messagesRef.current, aiMsg];
+                window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
 
                 setSubtitles(prev => [...prev, {
                     id: aiMsg.id, role: "assistant",

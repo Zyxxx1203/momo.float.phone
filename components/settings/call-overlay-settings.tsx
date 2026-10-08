@@ -25,10 +25,12 @@ import {
 import {
     isShellEnvironment,
     openAccessibilitySettings,
+    readShellOverlayDebugInfo,
     readShellOverlayTrace,
     requestOverlayPermission,
     supportsOverlayCustomColors,
     useShellOverlayStatus,
+    type ShellOverlayDebugInfo,
 } from "@/lib/shell-call-overlay";
 
 /** 可逐项自定义的颜色字段（不含 barAlpha，它单独用滑杆） */
@@ -49,6 +51,7 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
     const [supportsCustom, setSupportsCustom] = useState(true);
     const [status, refreshStatus] = useShellOverlayStatus();
     const [trace, setTrace] = useState(() => readShellOverlayTrace());
+    const [debug, setDebug] = useState<ShellOverlayDebugInfo | null>(() => readShellOverlayDebugInfo());
 
     useEffect(() => {
         setInShell(isShellEnvironment());
@@ -64,7 +67,10 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
 
     // 诊断区随权限状态刷新一起拉最新留痕：用户从系统设置授权后回来，
     // 一眼能看到权限变了没、原生事件有没有到过。
-    useEffect(() => { setTrace(readShellOverlayTrace()); }, [status]);
+    useEffect(() => {
+        setTrace(readShellOverlayTrace());
+        setDebug(readShellOverlayDebugInfo());
+    }, [status]);
 
     const choose = (key: string) => {
         // 换预设 = 回到该预设原样，清掉之前的逐项改动（否则会串味，用户会困惑）
@@ -164,7 +170,8 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
                     <div>
                         <div className="ts-14 font-semibold">逐项颜色</div>
                         <div className="ts-12 mt-1" style={{ color: "var(--c-text)", opacity: 0.75 }}>
-                            单改某一级颜色。没改的项仍跟随上面的预设。
+                            单改某一级颜色：点色块粗略挑，或直接填色号（如 #3B82F6，支持 #RGB 简写）。
+                            没改的项仍跟随上面的预设。
                         </div>
                     </div>
                     {custom && (
@@ -203,9 +210,12 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
                             <div className="ts-12" style={{ color: "var(--c-text)", opacity: 0.6 }}>{field.hint}</div>
                         </div>
                         <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>
-                            <span className="ts-12" style={{ color: "var(--c-text)", opacity: 0.7, fontFamily: "monospace" }}>
-                                {colors[field.key]}
-                            </span>
+                            {/* 可直接手打色号：取色器适合粗略挑，精调还是得填数值 */}
+                            <HexInput
+                                value={colors[field.key]}
+                                onCommit={(hex) => changeColor(field.key, hex)}
+                                ariaLabel={`${field.label}色号`}
+                            />
                             <input
                                 type="color"
                                 value={normalizeForPicker(colors[field.key])}
@@ -300,12 +310,37 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
                     <button
                         type="button"
                         className="ts-12"
-                        onClick={() => { refreshStatus(); setTrace(readShellOverlayTrace()); }}
+                        onClick={() => { refreshStatus(); setTrace(readShellOverlayTrace()); setDebug(readShellOverlayDebugInfo()); }}
                         style={{ border: "1px solid rgba(128,128,128,0.3)", borderRadius: 10, padding: "6px 12px", background: "transparent", color: "var(--c-text-title)", cursor: "pointer" }}
                     >
                         重新检测
                     </button>
                 </div>
+
+                {/* 浮窗内部状态：链路里每道闸门都列出来，不出现时一眼看出卡在哪 */}
+                {debug && (
+                    <div className="flex flex-col gap-1 ts-12" style={{ color: "var(--c-text)" }}>
+                        <div style={{ opacity: 0.75 }}>浮窗内部状态</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px" }}>
+                            <span>可绘制：<strong style={{ color: debug.canDraw ? "var(--c-success, #30A46C)" : "var(--c-danger, #E5484D)" }}>{debug.canDraw ? "是" : "否"}</strong></span>
+                            <span>服务运行：<strong>{debug.running ? "是" : "否"}</strong></span>
+                            <span>有实例：<strong>{debug.hasInstance ? "是" : "否"}</strong></span>
+                            <span>窗口已挂：<strong style={{ color: debug.windowAdded ? "var(--c-success, #30A46C)" : "var(--c-danger, #E5484D)" }}>{debug.windowAdded ? "是" : "否"}</strong></span>
+                            <span>应可见：<strong>{debug.visible ? "是" : "否"}</strong></span>
+                            <span>壳认知前台：<strong>{debug.hostInForeground ? "是" : "否"}</strong></span>
+                        </div>
+                        {debug.lastError ? (
+                            <div style={{ color: "var(--c-danger, #E5484D)", wordBreak: "break-all" }}>最近失败：{debug.lastError}</div>
+                        ) : (
+                            <div style={{ opacity: 0.6 }}>最近失败：无记录</div>
+                        )}
+                        <div style={{ opacity: 0.6, lineHeight: 1.5 }}>
+                            通话中切出去再回来点「重新检测」：应看到「服务运行/有实例/窗口已挂」都为「是」。
+                            若「可绘制」为否 → 权限问题；「有实例」为否 → 通话没把 START 发过来；
+                            「窗口已挂」为否 → 系统拒绝挂窗口，看「最近失败」。
+                        </div>
+                    </div>
+                )}
 
                 <div className="flex flex-col gap-1">
                     <div className="ts-12" style={{ color: "var(--c-text)", opacity: 0.75 }}>
@@ -345,6 +380,70 @@ export function CallOverlaySettings({ onNotice }: { onNotice: (msg: string) => v
             </div>
         </div>
     );
+}
+
+/**
+ * 色号输入框。
+ *
+ * 取色器适合粗略挑色，精确调色还是敲数值快（尤其参考别人给的配色）。
+ * 编辑期间不回写外部值，否则每敲一个字符都会被格式化打断；
+ * 失焦或回车才提交，非法输入退回原值，不会把配置写坏。
+ */
+function HexInput({ value, onCommit, ariaLabel }: { value: string; onCommit: (hex: string) => void; ariaLabel: string }) {
+    const [draft, setDraft] = useState(value);
+    const [focused, setFocused] = useState(false);
+
+    useEffect(() => {
+        if (!focused) setDraft(value);
+    }, [value, focused]);
+
+    const commit = () => {
+        const normalized = normalizeHexInput(draft);
+        if (normalized) {
+            onCommit(normalized);
+            setDraft(normalized);
+        } else {
+            // 输入不合法：退回当前值，不写进配置
+            setDraft(value);
+        }
+    };
+
+    return (
+        <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => { setFocused(false); commit(); }}
+            onKeyDown={(event) => {
+                if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); }
+                if (event.key === "Escape") { event.preventDefault(); setDraft(value); event.currentTarget.blur(); }
+            }}
+            aria-label={ariaLabel}
+            spellCheck={false}
+            autoComplete="off"
+            style={{
+                width: 88,
+                padding: "4px 7px",
+                borderRadius: 8,
+                border: "1px solid rgba(128,128,128,0.3)",
+                background: "transparent",
+                color: "var(--c-text-title)",
+                fontSize: 12,
+                fontFamily: "ui-monospace, monospace",
+                textAlign: "center",
+            }}
+        />
+    );
+}
+
+/** 规范用户敲进来的色号：接受 #RGB / #RRGGBB（# 可省），返回大写 #RRGGBB；非法返回 null */
+function normalizeHexInput(raw: string): string | null {
+    const value = raw.trim().replace(/^#/, "");
+    if (/^[0-9a-fA-F]{3}$/.test(value)) {
+        return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`.toUpperCase();
+    }
+    if (/^[0-9a-fA-F]{6}$/.test(value)) return `#${value}`.toUpperCase();
+    return null;
 }
 
 /** #RRGGBB → "R, G, B"（拼 rgba 用）；非法值给白，保证预览不崩 */

@@ -188,7 +188,8 @@ class CallOverlayService : Service() {
         @Volatile
         private var running = false
 
-        fun start(context: Context, name: String, avatar: String, meta: String, callId: String, elapsedSeconds: Int) {
+        /** 启动浮窗服务。返回是否真的起来了；失败原因记进 lastError 供诊断查看。 */
+        fun start(context: Context, name: String, avatar: String, meta: String, callId: String, elapsedSeconds: Int): Boolean {
             val intent = Intent(context, CallOverlayService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_NAME, name)
@@ -197,8 +198,17 @@ class CallOverlayService : Service() {
                 putExtra(EXTRA_CALL_ID, callId)
                 putExtra(EXTRA_ELAPSED, elapsedSeconds)
             }
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
-            else context.startService(intent)
+            // 这里不能吞掉异常：Android 12+ 从后台启动前台服务会抛
+            // ForegroundServiceStartNotAllowedException，正是「浮窗偶尔不出现」的成因，
+            // 记下来才能在诊断面板里看到，而不是只看到一个不出现的浮窗。
+            return runCatching {
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+                else context.startService(intent)
+                true
+            }.getOrElse { error ->
+                recordError("startForegroundService", error)
+                false
+            }
         }
 
         fun update(context: Context, name: String, avatar: String, meta: String, elapsedSeconds: Int) {
@@ -321,6 +331,45 @@ class CallOverlayService : Service() {
         /** 浮窗权限是否已授予（Android 6+ 需用户在系统设置里手动开）。 */
         fun canDraw(context: Context): Boolean =
             Build.VERSION.SDK_INT < 23 || android.provider.Settings.canDrawOverlays(context)
+
+        /**
+         * 最近一次失败的描述。
+         *
+         * 浮窗这条链路上全是 runCatching——好处是不会因为浮窗异常拖垮通话，
+         * 坏处是「不出现」时没有任何线索，只能靠猜。这里把最后一次失败原因记下来，
+         * 经 debugInfo 传给网页，在「通话浮窗外观 → 诊断」里直接看。
+         */
+        @Volatile
+        private var lastError: String = ""
+
+        private fun recordError(where: String, error: Throwable) {
+            lastError = "$where: ${error.javaClass.simpleName}: ${error.message}"
+        }
+
+        /**
+         * 浮窗内部状态快照（JSON），给网页诊断面板用。
+         *
+         * 排查「浮窗怎么又不见了」要看的就是这几项：
+         *   canDraw false        → 权限没给，系统不允许画浮层
+         *   running false        → 服务没跑起来（多半是后台启动被系统拒了）
+         *   hasInstance false    → 服务在跑但没有活动实例（通话没接到 START）
+         *   windowAdded false    → 窗口没挂上（addView 失败，见 lastError）
+         *   visible false        → 窗口挂上了但被藏起来（App 判定为前台）
+         */
+        fun debugInfo(context: Context): String {
+            val instance = liveInstance
+            return runCatching {
+                JSONObject()
+                    .put("canDraw", canDraw(context))
+                    .put("running", running)
+                    .put("hostInForeground", hostInForeground)
+                    .put("hasInstance", instance != null)
+                    .put("windowAdded", instance?.rootView != null)
+                    .put("visible", instance?.overlayVisible == true)
+                    .put("lastError", lastError)
+                    .toString()
+            }.getOrDefault("{}")
+        }
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -622,9 +671,10 @@ class CallOverlayService : Service() {
                 // 之前是先赋值 rootView 再 addView，异常还被静默吞掉：一旦 addView
                 // 失败，rootView 就非空而窗口并不存在，之后每次 show 都只是去改一个
                 // 没挂上的 View 的可见性——浮窗永远不出现，且没有任何报错。
-                val added = runCatching { windowManager.addView(layout, buildLayoutParams()) }.isSuccess
-                if (!added) {
+                val added = runCatching { windowManager.addView(layout, buildLayoutParams()) }
+                if (added.isFailure) {
                     rootLayout = null
+                    added.exceptionOrNull()?.let { recordError("addView", it) }
                     ShellBus.dispatchOverlayEvent("needPermission")
                     return@post
                 }

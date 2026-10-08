@@ -32,6 +32,8 @@ type ShellBridgeLike = {
     /** 完整配色的 JSON（预设键 + 逐项自定义），新壳才有 */
     getOverlayThemeJson?: () => string;
     setOverlayThemeJson?: (json: string) => void;
+    /** 浮窗内部状态快照（JSON），排障用 */
+    getOverlayDebugInfo?: () => string;
     isAccessibilityConnected?: () => boolean;
     openAccessibilitySettings?: () => void;
 };
@@ -218,6 +220,34 @@ export function setShellOverlayThemeJson(json: string): void {
 /** 壳是否支持逐项自定义配色（老 APK 只认主题键）。 */
 export function supportsOverlayCustomColors(): boolean {
     return typeof bridge()?.setOverlayThemeJson === "function";
+}
+
+/** 浮窗内部状态快照。浮窗「不出现」时用它定位卡在哪一环。 */
+export type ShellOverlayDebugInfo = {
+    /** 系统是否允许画浮层（false = 权限没给） */
+    canDraw: boolean;
+    /** 服务是否在运行 */
+    running: boolean;
+    /** 壳自己认知的前后台 */
+    hostInForeground: boolean;
+    /** 是否有活动实例（通话有没有发过 START） */
+    hasInstance: boolean;
+    /** 窗口是否真的挂上了（false 且 hasInstance = addView 失败） */
+    windowAdded: boolean;
+    /** 窗口是否处于「应可见」状态 */
+    visible: boolean;
+    /** 最近一次失败原因（空串 = 没记录到失败） */
+    lastError: string;
+};
+
+export function readShellOverlayDebugInfo(): ShellOverlayDebugInfo | null {
+    try {
+        const raw = bridge()?.getOverlayDebugInfo?.();
+        if (!raw) return null;
+        return JSON.parse(raw) as ShellOverlayDebugInfo;
+    } catch {
+        return null;
+    }
 }
 
 /** 收掉原生浮窗 */

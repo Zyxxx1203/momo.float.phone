@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.7"
+        const val VERSION = "1.0.8"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -530,11 +530,13 @@ class MainActivity : AppCompatActivity() {
             // 切到后台只是把已有窗口显示出来（showCallOverlay），不再从后台启动
             // 前台服务——Android 12+ 会拒绝，浮窗于是「有时不弹」。
             if (!CallOverlayService.canDraw(this@MainActivity)) return false
-            return runCatching {
-                CallOverlayService.start(this@MainActivity, name, avatar, meta, callId, elapsedSeconds)
-                true
-            }.getOrDefault(false)
+            // 交给 start 判断成败：它会把失败原因记进诊断，网页侧据此提示而不是静默
+            return CallOverlayService.start(this@MainActivity, name, avatar, meta, callId, elapsedSeconds)
         }
+
+        /** 浮窗内部状态快照（JSON），网页诊断面板直接展示。 */
+        @JavascriptInterface
+        fun getOverlayDebugInfo(): String = CallOverlayService.debugInfo(this@MainActivity)
 
         /** 切到后台：把预热好的浮窗显示出来。 */
         @JavascriptInterface

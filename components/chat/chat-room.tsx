@@ -6084,6 +6084,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                         {vcGroup.callType === "video" ? "视频通话" : "语音通话"}
                                         {vcGroup.duration ? ` · 全程${vcGroup.duration}` : ""}
                                         {` · 共${vcGroup.totalChatCount}条`}
+                                        {/* 临时构建标记：用来确认浏览器实际跑的是哪一版代码。
+                                            看不到「v3」就说明加载的是旧包（部署没更新 / Service Worker 缓存），
+                                            而不是这段逻辑没修。定位完即删。 */}
+                                        {" · v3"}
                                         {vcGroup.segmentCount > 1 ? ` · 第${vcGroup.segmentIndex}/${vcGroup.segmentCount}段` : ""}
                                         {/*「无结束记录」只标在最后一段：前面几段后面还有内容，
                                            标在每段上会让人以为每段都没结束。*/}

@@ -5058,6 +5058,30 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         return "displaySourceId" in msg && msg.displaySourceId ? msg.displaySourceId : msg.id;
     };
 
+    /**
+     * 手动标记 / 取消「通话结尾」。
+     *
+     * 为什么需要手动：自动配对依赖「发起」与「挂断」两条留痕，而超长通话里
+     * 「发起」常被挤出加载窗口（默认只加载最近 50 条），或者通话被意外中断
+     * 根本没写挂断——两种情况下自动扫描都折不起来，用户也就看不到「N条消息」。
+     * 手动标一条结尾，折叠逻辑就有了确定的锚点，不必再猜。
+     *
+     * 标记存在消息自身的 mediaData 上（不另开一张表）：删掉这条消息标记自然消失，
+     * 导出备份也会跟着走，不需要额外的清理逻辑。
+     */
+    const toggleCallEndMarker = useCallback((msg: ChatMessage | RenderChatMessage) => {
+        const id = getStoredActionMessageId(msg);
+        const target = loadChatMessages(session.id).find(m => m.id === id);
+        if (!target) return;
+        const nextData = { ...(target.mediaData || {}) };
+        const marking = nextData.callEndMarker !== true;
+        if (marking) nextData.callEndMarker = true;
+        else delete nextData.callEndMarker;
+        updateMessageMediaData(id, nextData);
+        syncMessagesFromStorage();
+        showChatToast(marking ? "已标记为通话结尾" : "已取消通话结尾标记");
+    }, [session.id, syncMessagesFromStorage]);
+
     /** Reusable context menu for user/assistant bubbles */
     const renderBubbleContextMenu = (m: ChatMessage, options?: { allowMultiSelect?: boolean }) => {
         const storedMessageId = getStoredActionMessageId(m);
@@ -5100,6 +5124,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     {m.role === "assistant" && (
                         <button onClick={() => handleRetry(storedMessageId)} className="ctx-menu-btn ctx-menu-btn-danger">重试以下</button>
                     )}
+                    <button onClick={() => { toggleCallEndMarker(m); setActiveMessageId(null); }} className="ctx-menu-btn">
+                        {m.mediaData?.callEndMarker ? "取消通话结尾" : "设为通话结尾"}
+                    </button>
                 </div>
                 <div className="flex">
                     <button onClick={() => { setQuotingMessage(m); setActiveMessageId(null); }} className="ctx-menu-btn">引用</button>
@@ -5400,7 +5427,26 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 //   · 中断后隔了很久才继续聊 → 停在时间断层处
                 // 时间断层这层限制必不可少：没有它，这个分组会把之后每一条
                 // 新消息都永远吸进来（因为没有终点，扫描只会越走越远）。
-                const interrupted = endIdx === -1;
+                // 优先级 1：用户手动标记的「通话结尾」。
+                //
+                // 自动配对依赖「发起」+「挂断」两条留痕：超长通话的「发起」可能被
+                // 挤出加载窗口，意外中断则压根没写挂断。手动标记给折叠一个确定的
+                // 锚点，比按时间断层猜准得多，所以排在最前面。
+                // 扫描遇下一条「发起」即止，避免把后来的通话也吸进来。
+                let interrupted = endIdx === -1;
+                if (interrupted) {
+                    for (let j = i + 1; j < projectedMessages.length; j++) {
+                        const candidate = projectedMessages[j];
+                        if (uiRole(candidate) === "system") {
+                            const c = candidate.content;
+                            if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
+                        }
+                        if (candidate.mediaData?.callEndMarker) { endIdx = j; break; }
+                    }
+                    interrupted = endIdx === -1;
+                }
+
+                // 优先级 2：时间断层兜底
                 if (interrupted) {
                     let fallbackEnd = i;
                     let prevTime = parseTime(msg.createdAt);
@@ -5896,7 +5942,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
                                         </svg>
                                     )}
-                                    <span>{vcGroup.callType === "video" ? "视频通话" : "语音通话"}{vcGroup.duration ? ` ${vcGroup.duration}` : ""}{chatCount > 0 ? ` · ${chatCount}条消息` : ""}{vcGroup.interrupted ? " · 无结束记录" : ""}</span>
+                                    {/* 条数常显：折叠条本身就是这段通话的入口，条数放在这里是
+                                        用户唯一能一眼看出「这段有多长」的地方——不显示等于信息丢失。 */}
+                                    <span>{vcGroup.callType === "video" ? "视频通话" : "语音通话"}{vcGroup.duration ? ` ${vcGroup.duration}` : ""} · {chatCount}条消息{vcGroup.interrupted ? " · 无结束记录" : ""}</span>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                                         className="ui-chevron-down-flip" {...(isExpanded ? { "data-open": "" } : {})}>
                                         <polyline points="6 9 12 15 18 9" />

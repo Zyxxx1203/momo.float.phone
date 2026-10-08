@@ -469,6 +469,23 @@ const TIME_GAP = 1 * 60 * 1000;
  */
 const CALL_GROUP_MAX_GAP_MS = 60 * 60 * 1000;
 
+/**
+ * 把 ISO 时间字符串解析成毫秒时间戳；空值 / 非法值一律返回 0。
+ *
+ * 为什么带一份自己的：chat-room 此前没有这个工具（同名函数定义在
+ * chat-message-list.tsx 内部，模块间不共享）。通话分组的兜底扫描直接引用
+ * 会抛 ReferenceError，整个聊天室白屏（用户实报的 client-side exception）。
+ *
+ * 刻意不叫 parseTime：那个名字在其它文件用过，万一将来这个文件上层也引入
+ * 一份同名声明，函数声明与它同作用域会直接语法报错（重复声明），白屏比这次
+ * 还难查。取个独占的名字从源头杜绝。
+ */
+function parseCallTime(value?: string | null): number {
+    if (!value) return 0;
+    const time = new Date(value).getTime();
+    return Number.isNaN(time) ? 0 : time;
+}
+
 function shouldShowTimestamp(currentMsg: string, prevMsg: string | null): boolean {
     if (!prevMsg) return true; // First message always shows time
     return new Date(currentMsg).getTime() - new Date(prevMsg).getTime() > TIME_GAP;
@@ -5460,10 +5477,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 // 没有它，找不到终点时扫描会一直往后走，把之后每条新消息都吸进来。
                 if (interrupted) {
                     let fallbackEnd = i;
-                    let prevTime = parseTime(msg.createdAt);
+                    let prevTime = parseCallTime(msg.createdAt);
                     for (let j = i + 1; j < allStored.length; j++) {
                         const candidate = allStored[j];
-                        const time = parseTime(candidate.createdAt);
+                        const time = parseCallTime(candidate.createdAt);
                         if (time && prevTime && time - prevTime > CALL_GROUP_MAX_GAP_MS) break;
                         if (time) prevTime = time;
                         if (uiRole(candidate) === "system") {

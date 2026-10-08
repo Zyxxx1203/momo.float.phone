@@ -5475,14 +5475,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     }
                 }
 
-                // ── 第二阶段：没有显式终点时的兜底 ──────────────
+                // ── 第二阶段：只有「用户手动标记的通话结尾」这一种兜底 ──
                 //
                 // 通话被意外中断（App 被杀、崩溃、强杀）时不会写挂断留痕，
-                // endIdx 停在 -1，整段散开。按优先级依次尝试两种兜底。
+                // endIdx 停在 -1。此时**不再按时间猜**通话何时结束：实测
+                // 「一边通话一边在聊天室发消息」会把聊天室那些消息也圈进通话
+                // 区间、被当成通话内容（用户实报）。结束时刻只认明确来源——
+                // 上面的挂断留痕，或用户亲手标记的结尾。两者都没有就整段不折叠，
+                // 等用户标记后再折。
                 let interrupted = endIdx === -1;
 
-                // 优先级 1：用户手动标记的「通话结尾」。
-                // 手动标记是明确指定，比按时间猜准得多，所以排在断层之前。
+                // 用户手动标记的「通话结尾」（消息右键菜单「设为通话结尾」）。
                 // 扫描遇下一条「发起」即止，避免把后来的通话也吸进来。
                 if (interrupted) {
                     for (let j = i + 1; j < allStored.length; j++) {
@@ -5496,38 +5499,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     interrupted = endIdx === -1;
                 }
 
-                // 优先级 2：时间断层兜底（范围从严）。
+                // 时间断层兜底已移除。
                 //
-                // 没有挂断留痕时，只能靠时间判断通话何时结束。这里对两类消息
-                // 用不同的容忍度 —— 这是修「正常聊天的消息被折进通话」的关键：
-                //   · 系统留痕：用较大的 CALL_GROUP_MAX_GAP_MS（通话中途可能长时间
-                //     没人说话，但那仍是这次通话的一部分）
-                //   · 普通对话：只有紧邻上一条才算通话期间（CALL_GROUP_CHAT_GAP_MS）。
-                //     通话结束后的闲聊通常不会紧跟着通话留痕，于是正确断开。
-                if (interrupted) {
-                    let fallbackEnd = i;
-                    let prevTime = parseCallTime(msg.createdAt);
-                    for (let j = i + 1; j < allStored.length; j++) {
-                        const candidate = allStored[j];
-                        const time = parseCallTime(candidate.createdAt);
-                        const gap = (time && prevTime) ? time - prevTime : 0;
-                        if (gap > CALL_GROUP_MAX_GAP_MS) break;
-                        if (uiRole(candidate) === "system") {
-                            const c = candidate.content;
-                            if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
-                            // 系统留痕：推进边界，容忍长静默
-                            fallbackEnd = j;
-                            if (time) prevTime = time;
-                            continue;
-                        }
-                        // 普通对话 / 工具卡片：只有紧邻（间隔小于短阈值）才算通话期间。
-                        // 超过就认为通话早已结束，后面的都是正常聊天，就此收尾。
-                        if (gap > CALL_GROUP_CHAT_GAP_MS) break;
-                        fallbackEnd = j;
-                        if (time) prevTime = time;
-                    }
-                    endIdx = fallbackEnd;
-                }
+                // 它按消息间隔猜「通话什么时候结束」，把通话期间在聊天室发的消息
+                // 也圈进了通话区间（用户实报「聊天室消息全被归为通话记录」）。
+                // 现在通话边界只认两个明确来源：挂断留痕、用户手动标记的结尾。
+                // 两者都没有时 endIdx 仍为 -1，下面不会折叠任何东西。
 
                 if (endIdx > i) {
                     // 只收「通话产生的消息」：
@@ -5572,7 +5549,23 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         //   · 终点不在窗口内 → 收在窗口内最后一条属于该区间的消息处
         const realIdOf = (msg: RenderChatMessage): string => msg.displaySourceId || msg.id;
         const windowRealIds = projectedMessages.map(realIdOf);
-        const groups: { startId: string; startIdx: number; endIdx: number; duration: string; callType: "voice" | "video"; interrupted: boolean; chatCount: number }[] = [];
+        type CallGroup = {
+            startId: string;
+            startIdx: number;
+            endIdx: number;
+            duration: string;
+            callType: "voice" | "video";
+            interrupted: boolean;
+            /** 全程对话条数（补偿显示：每一段都要能看出整通电话的规模） */
+            chatCount: number;
+            totalChatCount: number;
+            /** 通话被聊天室消息切断后的段号与总段数 */
+            segmentIndex: number;
+            segmentCount: number;
+            /** 本段在窗口内实际占用的下标 */
+            memberIndices: number[];
+        };
+        const groups: CallGroup[] = [];
         const memberSet = new Set<number>();
 
         for (const range of ranges) {
@@ -5581,19 +5574,30 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 if (range.memberIds.has(windowRealIds[k])) indicesInWindow.push(k);
             }
             if (indicesInWindow.length === 0) continue;
+            // 按「连续下标」切段：通话期间在聊天室发的消息不在 memberIds 里，
+            // 会把下标序列从中间断开——断点就是天然的段落边界。
+            const segments: number[][] = [];
+            for (const k of indicesInWindow) {
+                const last = segments[segments.length - 1];
+                if (last && k === last[last.length - 1] + 1) last.push(k);
+                else segments.push([k]);
+            }
             const exactStart = windowRealIds.indexOf(range.startMsgId);
-            const startIdx = exactStart >= 0 ? exactStart : indicesInWindow[0];
-            const endIdx = Math.max(startIdx, indicesInWindow[indicesInWindow.length - 1]);
-            for (const k of indicesInWindow) memberSet.add(k);
-            memberSet.add(startIdx);
-            groups.push({
-                startId: range.startMsgId,
-                startIdx,
-                endIdx,
-                duration: range.duration,
-                callType: range.callType,
-                interrupted: range.interrupted,
-                chatCount: range.chatCount,
+            segments.forEach((seg, segIdx) => {
+                for (const k of seg) memberSet.add(k);
+                groups.push({
+                    startId: segIdx === 0 ? range.startMsgId : `seg-${range.startMsgId}-${segIdx}`,
+                    startIdx: seg.includes(exactStart) ? exactStart : seg[0],
+                    endIdx: seg[seg.length - 1],
+                    duration: range.duration,
+                    callType: range.callType,
+                    interrupted: range.interrupted,
+                    chatCount: range.chatCount,
+                    totalChatCount: range.chatCount,
+                    segmentIndex: segIdx + 1,
+                    segmentCount: segments.length,
+                    memberIndices: seg,
+                });
             });
         }
 
@@ -6027,7 +6031,12 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     const vcGroup = voiceCallGroups.groups.find(g => g.startIdx === idx);
                     if (vcGroup) {
                         const isExpanded = expandedVoiceCallIds.has(vcGroup.startId);
-                        const groupMessages = projectedMessages.slice(vcGroup.startIdx, vcGroup.endIdx + 1);
+                        // 展开只渲染这条通话自己的消息（memberIndices）。
+                        // 早先按 [startIdx, endIdx] 整段切片，会把通话期间在聊天室发的
+                        // 消息也塞进通话面板里，看着像「聊天室消息被归为通话记录」（用户实报）。
+                        const groupMessages = vcGroup.memberIndices
+                            .map(i => projectedMessages[i])
+                            .filter(Boolean) as RenderChatMessage[];
                         // 条数用全量统计（vcGroup.chatCount）：窗口只加载了几十条，
                         // 按窗口算的话 700 分钟的通话会显示成「12条消息」，严重失真。
                         const chatCount = vcGroup.chatCount;
@@ -6076,7 +6085,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                         {vcGroup.duration ? ` · 全程${vcGroup.duration}` : ""}
                                         {` · 共${vcGroup.totalChatCount}条`}
                                         {vcGroup.segmentCount > 1 ? ` · 第${vcGroup.segmentIndex}/${vcGroup.segmentCount}段` : ""}
-                                        {vcGroup.interrupted ? " · 无结束记录" : ""}
+                                        {/*「无结束记录」只标在最后一段：前面几段后面还有内容，
+                                           标在每段上会让人以为每段都没结束。*/}
+                                        {vcGroup.interrupted && vcGroup.segmentIndex === vcGroup.segmentCount ? " · 无结束记录" : ""}
                                     </span>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                                         className="ui-chevron-down-flip" {...(isExpanded ? { "data-open": "" } : {})}>

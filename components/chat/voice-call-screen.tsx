@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from "react";
-import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues, updateChatMessage, deleteChatMessage } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
@@ -24,6 +24,7 @@ import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
 import { CallMiniWindow } from "./call-mini-window";
+import { CallSubtitleItem, type CallSubtitleAction } from "./call-subtitle-item";
 import { type CallAutoChatConfig, MAX_TURNS_LIMIT, MIN_INTERVAL_SECONDS, loadCallAutoChatConfig, randomAutoChatDelaySeconds, saveCallAutoChatConfig } from "@/lib/call-auto-chat";
 import { isShellEnvironment, stopShellCallOverlay } from "@/lib/shell-call-overlay";
 import { useShellCallOverlay } from "./use-shell-call-overlay";
@@ -43,6 +44,11 @@ type SubtitleEntry = {
     id: string;
     role: "user" | "assistant";
     text: string;
+    /** 这条字幕对应的聊天消息 id。编辑 / 删除 / 重新生成都要落到真实记录上，
+     *  所以从 1.0.10 起不再用假 id（原先角色字幕是 ai-<时间戳>，定位不到记录）。 */
+    messageIds?: string[];
+    /** 实际送去合成语音的文本；重听时用它重新合成。用户的话没有这一项。 */
+    speechText?: string;
 };
 
 type VoiceCallScreenProps = {
@@ -120,6 +126,21 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const [typedText, setTypedText] = useState("");
     const [bgImageResolved, setBgImageResolved] = useState<string | null>(null);
     const [showSttWarning, setShowSttWarning] = useState(false);
+    // 正在重听的字幕 id（按钮据此高亮）
+    const [replayingId, setReplayingId] = useState<string | null>(null);
+
+    // 已合成音频按字幕 id 缓存：重听直接放，不重复烧 TTS 额度。
+    // 上限 20 段——一次长通话能攒下几十段，全留着内存扛不住，丢最旧的。
+    const audioCacheRef = useRef<Map<string, Blob>>(new Map());
+    const cacheAudio = (id: string, blob: Blob) => {
+        const cache = audioCacheRef.current;
+        cache.set(id, blob);
+        while (cache.size > 20) {
+            const oldest = cache.keys().next().value;
+            if (oldest === undefined) break;
+            cache.delete(oldest);
+        }
+    };
     // 自动搭话：进通话时读一次配置；改动即时存盘并热生效
     const [autoChatConfig, setAutoChatConfig] = useState<CallAutoChatConfig>(() => loadCallAutoChatConfig());
     const [showAutoChatPanel, setShowAutoChatPanel] = useState(false);
@@ -359,7 +380,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── AI response processing (same logic as chat-room) ──
 
-    const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[] } => {
+    const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[]; messageIds: string[] } => {
+        // 本轮回合落进聊天记录的消息 id。字幕要带着它们，编辑 / 删除 / 重新生成
+        // 才能定位到真实记录——而不只是改屏幕上那一行字。
+        const createdMessageIds: string[] = [];
         // Use shared parseAIResponse for full rich media support (stickers, quotes, etc.)
         const previousState = getLatestCharacterStateValues(session.contactId);
 
@@ -388,6 +412,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 freshStateValues,
             });
             messagesRef.current = [...messagesRef.current, aiMsg];
+            createdMessageIds.push(aiMsg.id);
         } else {
             const newMsgs = chatParts.map((part, idx) =>
                 pushChatMessage({
@@ -404,6 +429,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 })
             );
             messagesRef.current = [...messagesRef.current, ...newMsgs];
+            createdMessageIds.push(...newMsgs.map(m => m.id));
         }
 
         // Return clean text parts for TTS (exclude rich media content)
@@ -411,7 +437,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             .filter(p => !p.mediaType && p.content.trim())
             .map(p => p.content);
 
-        return { cleanParts, stateValues };
+        return { cleanParts, stateValues, messageIds: createdMessageIds };
     }, [session.id, session.contactId]);
 
     // ── 自动搭话：安排下一次主动开口 ──────────────────
@@ -449,7 +475,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             messagesRef.current = [...messagesRef.current, userMsg];
 
             // Add user subtitle
-            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
+            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText, messageIds: [userMsg.id] }]);
         }
 
         // 2. Switch to PROCESSING
@@ -466,7 +492,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             if (stateRef.current === "ENDED") return;
 
             // 4. Process response
-            const { cleanParts } = processAIResponse(aiResponseText);
+            const { cleanParts, messageIds } = processAIResponse(aiResponseText);
             const displayText = cleanParts.join("\n");
             const speechText = stripBilingualForSpeech(displayText);
 
@@ -479,8 +505,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             }
 
             // 5. Add AI subtitle
+            // 带上 messageIds 与实际朗读文本：前者让长按菜单能改到真实记录，
+            // 后者让「重听」可以重新合成（不必从渲染后的富文本里再猜一遍）。
             const subtitleId = `ai-${Date.now()}`;
-            setSubtitles(prev => [...prev, { id: subtitleId, role: "assistant", text: displayText }]);
+            setSubtitles(prev => [...prev, { id: subtitleId, role: "assistant", text: displayText, messageIds, speechText }]);
 
             // 6. TTS —— 缩成悬浮窗也照常播。
             // 原先这里遇到小窗直接静默返回，于是「正在生成时退出全屏」那句话
@@ -494,6 +522,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     if (stateRef.current === "ENDED") return;
 
                     if (audioBlob) {
+                        // 存一份给「重听」用：不然每次重听都要重新调一次 TTS API，
+                        // 既慢又费额度。缓存满了自动丢最旧的（见 cacheAudio）。
+                        cacheAudio(subtitleId, audioBlob);
                         const { promise, abort } = playCallAudio(audioBlob);
                         audioAbortRef.current = abort;
                         await promise;
@@ -785,6 +816,75 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         runTurn: (text) => { void runConversationTurn(text); },
         active: callState !== "CONNECTING" && callState !== "ENDED",
     });
+
+    // ── 字幕操作：重听 / 编辑 / 删除 / 重新生成 ──────
+    //
+    // 四项都要落到真实聊天记录上（字幕带着 messageIds），不是只改屏幕上那行字：
+    // 只改屏幕会被下次重渲染覆盖，只改记录则通话页与聊天页对不上。
+
+    /** 重听一句。优先放缓存，没有就现场合成；合成结果缓存起来，避免重复烧 TTS 额度。 */
+    const handleReplaySubtitle = useCallback(async (sub: SubtitleEntry) => {
+        const text = (sub.speechText || sub.text).trim();
+        if (!text) return;
+        // 先掐掉正在播的那句，否则两句叠在一起听不清
+        if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
+        const cached = audioCacheRef.current.get(sub.id);
+        const voiceConfig = cached ? null : resolveVoiceConfig(session.contactId);
+        if (!cached && !voiceConfig) return;
+        setReplayingId(sub.id);
+        try {
+            let blob: Blob | null = cached ?? null;
+            if (!blob && voiceConfig) {
+                blob = await synthesizeSpeech(text, voiceConfig);
+                if (blob) cacheAudio(sub.id, blob);
+            }
+            if (!blob) return;
+            const { promise, abort } = playCallAudio(blob);
+            audioAbortRef.current = abort;
+            await promise;
+            audioAbortRef.current = null;
+        } catch (e) {
+            console.warn("[VoiceCall] replay failed:", e);
+        } finally {
+            setReplayingId((current) => (current === sub.id ? null : current));
+        }
+    }, [session.contactId, playCallAudio]);
+
+    /** 编辑一句：改写真实记录 + 同步字幕文本，并作废这句的音频缓存。 */
+    const handleEditSubtitle = useCallback((sub: SubtitleEntry, next: string) => {
+        const ids = sub.messageIds ?? [];
+        if (ids.length > 0) updateChatMessage(ids[0], { content: next });
+        setSubtitles(prev => prev.map(item => item.id === sub.id
+            ? { ...item, text: next, speechText: item.role === "assistant" ? next : undefined }
+            : item));
+        audioCacheRef.current.delete(sub.id);
+        messagesRef.current = loadChatMessages(session.id);
+    }, [session.id]);
+
+    /** 删除一句：先删真实记录，再摘掉字幕。 */
+    const handleDeleteSubtitle = useCallback((sub: SubtitleEntry) => {
+        for (const id of sub.messageIds ?? []) deleteChatMessage(id);
+        setSubtitles(prev => prev.filter(item => item.id !== sub.id));
+        audioCacheRef.current.delete(sub.id);
+        messagesRef.current = loadChatMessages(session.id);
+    }, [session.id]);
+
+    /**
+     * 重新生成一句：删掉这句对应的记录，再让角色基于当前上下文重说一轮。
+     *
+     * 只在空闲时可用——正在生成或说话时重开会打断在途的一轮，状态机会乱。
+     * 界面侧也只对「最后一条角色字幕」开放：它要删掉这句之后的记录，
+     * 对中间句开放会把用户后面说的话一起级联删掉。
+     */
+    const handleRegenerateSubtitle = useCallback((sub: SubtitleEntry) => {
+        if (stateRef.current !== "IDLE") return;
+        for (const id of sub.messageIds ?? []) deleteChatMessage(id);
+        setSubtitles(prev => prev.filter(item => item.id !== sub.id));
+        audioCacheRef.current.delete(sub.id);
+        // 先同步内存上下文再重开，否则角色会看见刚被删掉的那句
+        messagesRef.current = loadChatMessages(session.id);
+        void runConversationTurn();
+    }, [session.id, runConversationTurn]);
 
     // ── 接入原生浮窗 ──
     //
@@ -1158,15 +1258,40 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                             对方说完就发 · 还有 {replyQueue.pending} 条
                         </div>
                     )}
-                    {subtitles.map((sub) => (
-                        <div
-                            key={sub.id}
-                            className="call-subtitle"
-                            data-role={sub.role}
-                        >
-                            <BilingualTextBlock text={sub.text} mode="plain" className="call-subtitle-bilingual" defaultExpanded={session.collapseBilingualTranslation !== false ? false : true} />
-                        </div>
-                    ))}
+                    {subtitles.map((sub, index) => {
+                        const isAssistant = sub.role === "assistant";
+                        // 「重新生成」只给最后一条角色字幕：它要删掉这句及之后的记录重说，
+                        // 对中间句开放会把用户后面说的话一起级联删掉。
+                        const isLastAssistant = isAssistant
+                            && !subtitles.slice(index + 1).some(item => item.role === "assistant");
+                        const actions: CallSubtitleAction[] = [];
+                        if (isLastAssistant) {
+                            actions.push({
+                                key: "regenerate",
+                                label: "重新生成这一句",
+                                onSelect: () => handleRegenerateSubtitle(sub),
+                            });
+                        }
+                        actions.push({
+                            key: "delete",
+                            label: "删除这一句",
+                            danger: true,
+                            onSelect: () => handleDeleteSubtitle(sub),
+                        });
+                        return (
+                            <CallSubtitleItem
+                                key={sub.id}
+                                role={sub.role}
+                                text={sub.text}
+                                bilingualClassName="call-subtitle-bilingual"
+                                defaultExpanded={session.collapseBilingualTranslation !== false ? false : true}
+                                onReplay={isAssistant ? () => { void handleReplaySubtitle(sub); } : undefined}
+                                replaying={replayingId === sub.id}
+                                actions={actions}
+                                onEditSubmit={(next) => handleEditSubtitle(sub, next)}
+                            />
+                        );
+                    })}
 
                     {/* Interim STT text */}
                     {interimText && callState === "USER_SPEAKING" && (

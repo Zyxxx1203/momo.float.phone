@@ -1,6 +1,6 @@
-# momo.float.phone fork 相对官方上游的改动总台账
+# 自部署 fork 相对官方上游的改动总台账
 
-> 归属：`Zyxxx1203/momo.float.phone`（分支 `main`）
+> 归属：个人自部署 fork（分支 `main`）
 > 用途：自己留存 + 将来同步官方时判断冲突 + 给接手的人一条不走弯路的线索
 > 生成方式：逐文件读源码实证为主，未读到的地方明确标注，绝不把推断写成事实
 
@@ -419,7 +419,7 @@
 
 ### 事故 1：连续提交两份文档，第二份丢失
 
-- **经过**：先提交 `docs/call-feature-porting-guide.md` 成功 → 远端 `main` 前进到 `e1645c1877`；紧接着提交 `docs/fork-changes-overview.md`，但该提交基于更早的 `a7069a7d8f`。
+- **经过**：先提交 `docs/call-feature-porting-guide.md` 成功 → 远端 `main` 前进了一次；紧接着提交 `docs/fork-changes-overview.md`，但该提交基于更早的基点。
 - **结果**：GitHub 返回 `422 Update is not a fast forward`。推送被拒，**暂存区同时被清空**，远端也没有该文件 → 第二份文档两头落空，只能重写。
 - **根因**：提交基点过期（非快进）+ 失败时暂存清空，两个条件叠加造成丢失。
 - **教训**：

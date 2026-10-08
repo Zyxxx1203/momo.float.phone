@@ -457,6 +457,18 @@ function cancelOfflineGenerationRun(sessionId: string): boolean {
 
 const TIME_GAP = 1 * 60 * 1000;
 
+/**
+ * 通话分组的兜底边界：相邻两条消息间隔超过它，就认为这次通话已经结束。
+ *
+ * 为什么需要：通话被意外中断（App 被杀、崩溃、强杀）时不会写「挂断」留痕，
+ * 旧的配对逻辑找不到终点，endIdx 停在 -1，整段通话散开、折不起来，
+ * 连「N条消息」都看不到。用时间断层兜底后，没有挂断记录也能折起来。
+ *
+ * 取舍：调大 → 断线后马上又聊的内容会被一起折进去；调小 → 长通话中途长时间
+ * 静音（挂着不说话）会被切成两段。
+ */
+const CALL_GROUP_MAX_GAP_MS = 60 * 60 * 1000;
+
 function shouldShowTimestamp(currentMsg: string, prevMsg: string | null): boolean {
     if (!prevMsg) return true; // First message always shows time
     return new Date(currentMsg).getTime() - new Date(prevMsg).getTime() > TIME_GAP;
@@ -5345,7 +5357,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     // Build a map: startMsgId → { startIdx, endIdx, duration }
     // and a set of all message indices that belong to a voice call group
     const voiceCallGroups = useMemo(() => {
-        const groups: { startId: string; startIdx: number; endIdx: number; duration: string; callType: "voice" | "video" }[] = [];
+        const groups: { startId: string; startIdx: number; endIdx: number; duration: string; callType: "voice" | "video"; interrupted: boolean }[] = [];
         const memberSet = new Set<number>();
 
         let i = 0;
@@ -5358,6 +5370,10 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             if (isVoiceStart || isVideoStart) {
                 const callType = isVideoStart ? "video" : "voice";
                 const kw = isVideoStart ? "视频通话" : "语音通话";
+                // ── 第一阶段：找显式终点（挂断/拒绝/取消）──────
+                //
+                // 这一步刻意不受「时间断层」影响：挂断记录可能因为各种原因
+                // 与上一条消息隔得较远，用时间提前截断反而会漏掉真正的终点。
                 let endIdx = -1;
                 let duration = "";
                 for (let j = i + 1; j < projectedMessages.length; j++) {
@@ -5373,8 +5389,38 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                         break;
                     }
                 }
+
+                // ── 第二阶段：没有显式终点时的兜底边界 ──────────
+                //
+                // 通话被意外中断（App 被杀、崩溃、强杀）时不会写挂断留痕，
+                // 过去 endIdx 停在 -1，整段散开、连「N条消息」都看不到。
+                // 这里改用「最后一条仍算作本次通话的消息」收尾，三种中断情形都能折起来：
+                //   · 后面又打了新电话 → 停在新的「发起」之前
+                //   · 聊到已加载范围的末尾 → 停在这一段末尾
+                //   · 中断后隔了很久才继续聊 → 停在时间断层处
+                // 时间断层这层限制必不可少：没有它，这个分组会把之后每一条
+                // 新消息都永远吸进来（因为没有终点，扫描只会越走越远）。
+                const interrupted = endIdx === -1;
+                if (interrupted) {
+                    let fallbackEnd = i;
+                    let prevTime = parseTime(msg.createdAt);
+                    for (let j = i + 1; j < projectedMessages.length; j++) {
+                        const candidate = projectedMessages[j];
+                        const time = parseTime(candidate.createdAt);
+                        if (time && prevTime && time - prevTime > CALL_GROUP_MAX_GAP_MS) break;
+                        if (time) prevTime = time;
+                        const isSystem = uiRole(candidate) === "system";
+                        if (isSystem) {
+                            const c = candidate.content;
+                            if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
+                        }
+                        // 通话期间角色发的消息、工具卡片等也要折进来
+                        fallbackEnd = j;
+                    }
+                    endIdx = fallbackEnd;
+                }
                 if (endIdx > i) {
-                    groups.push({ startId: msg.id, startIdx: i, endIdx, duration, callType });
+                    groups.push({ startId: msg.id, startIdx: i, endIdx, duration, callType, interrupted });
                     for (let k = i; k <= endIdx; k++) memberSet.add(k);
                     i = endIdx + 1;
                     continue;
@@ -5850,7 +5896,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
                                         </svg>
                                     )}
-                                    <span>{vcGroup.callType === "video" ? "视频通话" : "语音通话"}{vcGroup.duration ? ` ${vcGroup.duration}` : ""}{chatCount > 0 ? ` · ${chatCount}条消息` : ""}</span>
+                                    <span>{vcGroup.callType === "video" ? "视频通话" : "语音通话"}{vcGroup.duration ? ` ${vcGroup.duration}` : ""}{chatCount > 0 ? ` · ${chatCount}条消息` : ""}{vcGroup.interrupted ? " · 无结束记录" : ""}</span>
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                                         className="ui-chevron-down-flip" {...(isExpanded ? { "data-open": "" } : {})}>
                                         <polyline points="6 9 12 15 18 9" />

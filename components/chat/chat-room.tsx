@@ -470,6 +470,22 @@ const TIME_GAP = 1 * 60 * 1000;
 const CALL_GROUP_MAX_GAP_MS = 60 * 60 * 1000;
 
 /**
+ * 兜底扫描里，普通对话（角色消息、工具卡片）延续通话的间隔上限。
+ *
+ * 为什么需要它、且必须比 CALL_GROUP_MAX_GAP_MS 小得多：
+ * 没有挂断留痕时，兜底扫描原本对「所有消息」一视同仁，只要相邻间隔不超 1 小时
+ * 就把边界一路往后推——结果是通话结束后整整一小时内的聊天室消息、卡片全被
+ * 吸进通话分组（用户实报：正常聊天的内容都被折进去了）。
+ *
+ * 这里区分两类消息：
+ *   · 系统留痕（发起/接听/挂断…）→ 用 CALL_GROUP_MAX_GAP_MS，容忍长静默
+ *   · 普通对话 → 只有紧邻（间隔小于本阈值）才算通话期间，否则视为通话已结束
+ * 通话期间对话通常一问一答很密，10 分钟足够；通话结束后开始闲聊时，第一条
+ * 通常已经隔了更久，于是正确断开，不再误吞。
+ */
+const CALL_GROUP_CHAT_GAP_MS = 10 * 60 * 1000;
+
+/**
  * 把 ISO 时间字符串解析成毫秒时间戳；空值 / 非法值一律返回 0。
  *
  * 为什么带一份自己的：chat-room 此前没有这个工具（同名函数定义在
@@ -5473,22 +5489,35 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     interrupted = endIdx === -1;
                 }
 
-                // 优先级 2：时间断层兜底。
-                // 没有它，找不到终点时扫描会一直往后走，把之后每条新消息都吸进来。
+                // 优先级 2：时间断层兜底（范围从严）。
+                //
+                // 没有挂断留痕时，只能靠时间判断通话何时结束。这里对两类消息
+                // 用不同的容忍度 —— 这是修「正常聊天的消息被折进通话」的关键：
+                //   · 系统留痕：用较大的 CALL_GROUP_MAX_GAP_MS（通话中途可能长时间
+                //     没人说话，但那仍是这次通话的一部分）
+                //   · 普通对话：只有紧邻上一条才算通话期间（CALL_GROUP_CHAT_GAP_MS）。
+                //     通话结束后的闲聊通常不会紧跟着通话留痕，于是正确断开。
                 if (interrupted) {
                     let fallbackEnd = i;
                     let prevTime = parseCallTime(msg.createdAt);
                     for (let j = i + 1; j < allStored.length; j++) {
                         const candidate = allStored[j];
                         const time = parseCallTime(candidate.createdAt);
-                        if (time && prevTime && time - prevTime > CALL_GROUP_MAX_GAP_MS) break;
-                        if (time) prevTime = time;
+                        const gap = (time && prevTime) ? time - prevTime : 0;
+                        if (gap > CALL_GROUP_MAX_GAP_MS) break;
                         if (uiRole(candidate) === "system") {
                             const c = candidate.content;
                             if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
+                            // 系统留痕：推进边界，容忍长静默
+                            fallbackEnd = j;
+                            if (time) prevTime = time;
+                            continue;
                         }
-                        // 通话期间角色发的消息、工具卡片等也要折进来
+                        // 普通对话 / 工具卡片：只有紧邻（间隔小于短阈值）才算通话期间。
+                        // 超过就认为通话早已结束，后面的都是正常聊天，就此收尾。
+                        if (gap > CALL_GROUP_CHAT_GAP_MS) break;
                         fallbackEnd = j;
+                        if (time) prevTime = time;
                     }
                     endIdx = fallbackEnd;
                 }

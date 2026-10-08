@@ -25,6 +25,7 @@ import {
     supportsCallOverlay,
     supportsOverlayShowHide,
     updateShellCallOverlay,
+    updateShellCallOverlayPending,
 } from "@/lib/shell-call-overlay";
 
 type UseShellCallOverlayParams = {
@@ -42,6 +43,9 @@ type UseShellCallOverlayParams = {
     onRestore?: () => void;
     /** 原生计时校准（调用方应只前进不后退） */
     onTick: (seconds: number) => void;
+    /** 待发消息条数：同步到原生浮窗左上角角标（与网页小窗对齐）。
+     *  通话忙碌时排队的消息在切到别的 App 后看不见队列，角标是唯一的提示。 */
+    pendingCount?: number;
 };
 
 /**
@@ -152,6 +156,20 @@ export function useShellCallOverlay(params: UseShellCallOverlayParams) {
             meta: [params.label, "{{time}}"],
         });
     }, [supported, supportsPrewarm, params.active, params.name, params.avatar, params.label]);
+
+    // 待发条数同步到原生浮窗角标。
+    // 数字只有 0~5 这么几个值，直接每次都调，不值得为它做去抖。
+    //
+    // 依赖里必须带上 pageHidden：浮窗是「切到后台」才亮出来的。如果用户在
+    // App 内就已经排了几条消息、然后才切出去，那一刻 pendingCount 并没有变化，
+    // 只靠它的 effect 不会重跑，角标就是空的——直到下一条消息入队才补上。
+    // 带上 pageHidden 后，切后台（浮窗亮起）会再推一次当前条数。
+    useEffect(() => {
+        if (!supported || !params.active) return;
+        // 新壳要等服务暖好；老壳没有角标这个概念
+        if (supportsPrewarm && !overlayStartedRef.current) return;
+        updateShellCallOverlayPending(params.pendingCount ?? 0);
+    }, [supported, supportsPrewarm, params.active, params.pendingCount, pageHidden]);
 
     // 后台期间定期回灌时长，纠正两边漂移。
     //

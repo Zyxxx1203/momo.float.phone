@@ -25,6 +25,8 @@ type ShellBridgeLike = {
     showCallOverlay?: () => void;
     hideCallOverlay?: () => void;
     updateCallOverlay?: (name: string, avatar: string, meta: string, elapsedSeconds: number) => void;
+    /** 左上角「待发 N」角标（0 = 隐藏）。新壳才有 */
+    updateCallOverlayPending?: (count: number) => void;
     stopCallOverlay?: () => void;
     /** 快捷回复条配色主题（存在壳侧 SharedPreferences） */
     getOverlayTheme?: () => string;
@@ -134,6 +136,23 @@ export function updateShellCallOverlay(params: {
             (params.meta ?? []).join("\n"),
             Math.max(0, Math.floor(params.elapsedSeconds ?? 0)),
         );
+    } catch {
+        /* 浮窗不在或 WebView 已销毁，忽略 */
+    }
+}
+
+/**
+ * 更新原生浮窗左上角的「待发 N」角标（0 = 隐藏）。
+ *
+ * 与网页小窗的角标对齐：通话忙碌时从浮窗回复条发出去的消息会排队等角色说完，
+ * 没有角标用户根本不知道消息还排着，只会以为「又空发了」。
+ * 老壳没有这个方法，静默忽略。
+ */
+export function updateShellCallOverlayPending(count: number): void {
+    const b = bridge();
+    if (!b?.updateCallOverlayPending) return;
+    try {
+        b.updateCallOverlayPending(Math.max(0, Math.floor(count)));
     } catch {
         /* 浮窗不在或 WebView 已销毁，忽略 */
     }

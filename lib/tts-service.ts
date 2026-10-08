@@ -364,19 +364,41 @@ function playAudioBlobElement(blob: Blob): { promise: Promise<void>; abort: () =
 
     let settled = false;
     let resolveFn: () => void = () => {};
+    let guardTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearGuard = () => {
+        if (guardTimer !== null) { clearTimeout(guardTimer); guardTimer = null; }
+    };
     const finalize = () => {
         if (settled) return;
         settled = true;
+        clearGuard();
         audio.onended = null;
         audio.onerror = null;
+        audio.onpause = null;
+        audio.onloadedmetadata = null;
         URL.revokeObjectURL(url);
         try { audio.pause(); audio.removeAttribute("src"); audio.load(); } catch {}
         resolveFn();
+    };
+    // 播放被别的 App（如后台刷视频）抢走音频焦点时，浏览器只会发一个 pause，
+    // ended 永远不会来——await promise 就此挂死，调用方状态机卡在「对方正在说话」，
+    // 排队的消息再也等不到 IDLE。把这种「非我们主动的暂停」当作播放结束。
+    const onPause = () => { if (!settled) finalize(); };
+    // 兜底闸门：万一连 pause 都不发（play() 悬着、缓冲卡死），也要让 promise 落定。
+    // 音频时长已知就按它放宽，未知给一个固定上限。
+    const armGuard = () => {
+        clearGuard();
+        const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+        const capMs = duration > 0 ? (duration * 2 + 15) * 1000 : 180_000;
+        guardTimer = setTimeout(() => { if (!settled) finalize(); }, capMs);
     };
     const promise = new Promise<void>((resolve) => {
         resolveFn = resolve;
         audio.onended = finalize;
         audio.onerror = finalize;
+        audio.onpause = onPause;
+        audio.onloadedmetadata = armGuard;
+        armGuard();
         audio.play().catch(() => {
             finalize();
         });

@@ -258,6 +258,17 @@ class CallOverlayService : Service() {
         }
 
         /**
+         * 更新「待发 N」角标。
+         *
+         * 走同进程实例直改，不另开 Intent 动作：角标是高频小改动（用户每发一条消息
+         * 就要变一次），为它排队一个 Service Intent 既慢又没必要。实例不在（没在通话）
+         * 时静默忽略。
+         */
+        fun updatePending(context: Context, count: Int) {
+            liveInstance?.applyPendingCount(count)
+        }
+
+        /**
          * 显示浮窗（App 刚切到后台时调用）。
          *
          * 注意这里用 startService 而不是 startForegroundService：服务在通话接通时
@@ -592,6 +603,9 @@ class CallOverlayService : Service() {
     private var bgImage: ImageView? = null
     private var nameView: TextView? = null
     private var metaView: TextView? = null
+    /** 左上角「待发 N」角标：网页侧队列里还有没轮到的消息时显示，
+     *  让人知道话没丢、只是在等角色说完。和网页小窗的角标对齐。 */
+    private var badgeView: TextView? = null
     /** 独立的快捷回复条（另一个 WindowManager 窗口，不与小窗共用） */
     private var replyWindow: View? = null
     private var replyInput: EditText? = null
@@ -719,6 +733,14 @@ class CallOverlayService : Service() {
     /** 构建浮窗内容：底图 + 压暗遮罩 + 底部信息 + 右下缩放柄 + 长按弹出的回复框。 */
     private fun buildContentView(layout: FrameLayout) {
         layout.removeAllViews()
+        // 圆角矩形：窗口天生是矩形，给根布局铺一层圆角背景并开启 clipToOutline，
+        // 子视图（底图、压暗遮罩、文字）会被裁进这个圆角里；圆角外没有背景即透明，
+        // 看上去就是一块圆角矩形。
+        layout.background = GradientDrawable().apply {
+            cornerRadius = dp(16).toFloat()
+            setColor(Color.parseColor("#1B1B22"))
+        }
+        layout.clipToOutline = true
 
         // 注意：底图不要挂 setOnClickListener。
         // ImageView 可点击时会消费触摸事件，父容器（浮窗根布局）的拖动监听
@@ -776,6 +798,30 @@ class CallOverlayService : Service() {
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM,
         ))
+
+        // 左上角「待发 N」角标。
+        // 之前只有网页小窗有，切到原生浮窗后从回复条发的消息在排队时毫无提示，
+        // 用户以为消息丢了。这里补齐，和网页小窗行为一致。
+        badgeView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(7), dp(3), dp(7), dp(3))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(Color.parseColor("#CC000000"))
+            }
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+        }
+        layout.addView(badgeView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.START,
+        ).apply {
+            setMargins(dp(7), dp(7), 0, 0)
+        })
 
         // 右下角缩放柄
         val handle = View(this).apply {
@@ -1122,6 +1168,19 @@ class CallOverlayService : Service() {
                 replyWindow = bar
                 replyInput?.requestFocus()
                 showIme(replyInput)
+            }
+        }
+    }
+
+    /** 更新「待发 N」角标；count <= 0 时隐藏。非主线程调用会自行切回主线程。 */
+    private fun applyPendingCount(count: Int) {
+        main.post {
+            val badge = badgeView ?: return@post
+            if (count <= 0) {
+                badge.visibility = View.GONE
+            } else {
+                badge.text = "待发 $count"
+                badge.visibility = View.VISIBLE
             }
         }
     }

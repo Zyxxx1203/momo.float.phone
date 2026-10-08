@@ -15,6 +15,8 @@
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 
+import { updateShellCallOverlayPending } from "@/lib/shell-call-overlay";
+
 /** 一次最多排几条。超了说明对面一直说不完，先拒掉免得越积越多、
  *  等想起来时一股脑全发出去。 */
 export const MAX_PENDING_REPLIES = 5;
@@ -63,6 +65,16 @@ export function useCallReplyQueue({ callState, callStateRef, runTurn, active }: 
         queueRef.current = [];
         setPending(0);
     }, []);
+
+    // 待发条数同步到安卓壳的原生浮窗角标。
+    //
+    // 接在这个共用 hook 里而不是各通话屏的接线处：语音/视频/群聊三个屏都用它，
+    // 一处生效全覆盖，不必每屏各接一遍（视频屏此前就因为漏接，从浮窗回复条
+    // 发出的消息在排队时毫无提示）。非壳环境与老壳上是 no-op。
+    // 挂断清空后 pending 归 0，角标随之隐藏。
+    useEffect(() => {
+        updateShellCallOverlayPending(pending);
+    }, [pending]);
 
     // 回到 IDLE 就把排队的发出去。
     // 一次只发一条：发出去后状态立刻变 PROCESSING，effect 重跑时不再是 IDLE，

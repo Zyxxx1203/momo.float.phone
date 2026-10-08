@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.9"
+        const val VERSION = "1.0.10"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -559,6 +559,19 @@ class MainActivity : AppCompatActivity() {
             // 同样走缓存文件：update 也是 Intent，一样受 Binder 事务上限约束
             val avatarRef = CallOverlayService.prepareAvatarRef(this@MainActivity, avatar)
             runCatching { CallOverlayService.update(this@MainActivity, name, avatarRef, meta, elapsedSeconds) }
+        }
+
+        /**
+         * 更新浮窗左上角的「待发 N」角标（0 = 隐藏）。
+         *
+         * 网页小窗一直有这个角标，原生浮窗此前没有：通话忙碌时从浮窗回复条
+         * 发的消息会排队等角色说完，没有角标用户完全不知道话还排着，只当是丢了。
+         * 走同进程实例直改（不走 Intent）：角标是高频小改动，没必要排队等一次
+         * Service 投递。
+         */
+        @JavascriptInterface
+        fun updateCallOverlayPending(count: Int) {
+            runCatching { CallOverlayService.updatePending(this@MainActivity, count) }
         }
 
         /** 收掉浮窗（挂断或退回全屏时调用）。 */

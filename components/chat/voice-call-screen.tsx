@@ -816,6 +816,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 setCallDuration(seconds);
             }
         },
+        // 待发条数同步给原生浮窗角标：切到别的 App 后队列看不见，
+        // 这是唯一能告诉用户「话还排着、没丢」的地方。
+        pendingCount: replyQueue.pending,
     });
 
     // 浮窗权限未开时的引导条（钩子里给标记，这里管自动消失）

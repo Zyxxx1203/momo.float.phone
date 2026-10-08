@@ -650,8 +650,11 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         avatar: bgImageResolved || character.avatar || null,
         getDuration: () => callDurationRef.current,
         onReply: (text) => {
-            // 与界面里手动输入走同一条通路：会落聊天记录、触发角色回复与 TTS
-            if (stateRef.current === "IDLE") void runConversationTurn(text);
+            // 与界面里手动输入走同一条通路，并且一律进队列。
+            // 原先这里是 `if (IDLE) runConversationTurn(text)`——角色说话/思考时
+            // 从浮窗回复条发出的消息被静默丢弃（语音屏早已修掉，视频屏漏改了）。
+            // 走 replyQueue：忙时排队、空闲自动补发，用户不会「空发」。
+            replyQueue.submit(text);
         },
         onHangup: () => handleHangup(),
         onRestore,

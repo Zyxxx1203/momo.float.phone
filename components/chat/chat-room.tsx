@@ -5383,13 +5383,31 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     // Build a map: startMsgId → { startIdx, endIdx, duration }
     // and a set of all message indices that belong to a voice call group
+    // 全量预计算：不看已渲染的那几十条，直接翻整个会话算出所有通话区间，
+    // 再映射回当前窗口。
+    //
+    // 为什么必须这样：聊天室默认只加载最近 50 条消息，而长通话（几小时、上千条）
+    // 的「发起语音通话」留痕早被挤出窗口。只扫窗口时找不到起点，整段折不起来，
+    // 连「N条消息」都看不到——用户实报的就是这个（手动往上翻把起点加载进来就正常了，
+    // 正是窗口截断的铁证）。
     const voiceCallGroups = useMemo(() => {
-        const groups: { startId: string; startIdx: number; endIdx: number; duration: string; callType: "voice" | "video"; interrupted: boolean }[] = [];
-        const memberSet = new Set<number>();
+        type CallRange = {
+            startMsgId: string;
+            endMsgId: string;
+            duration: string;
+            callType: "voice" | "video";
+            interrupted: boolean;
+            /** 这段通话的对话条数（系统留痕不算），按全量记录统计 */
+            chatCount: number;
+            /** 这段通话包含的全部消息 id，用于映射回当前窗口 */
+            memberIds: Set<string>;
+        };
+        const ranges: CallRange[] = [];
+        const allStored = loadChatMessages(session.id).filter(m => !isReadingDiscussMessage(m));
 
         let i = 0;
-        while (i < projectedMessages.length) {
-            const msg = projectedMessages[i];
+        while (i < allStored.length) {
+            const msg = allStored[i];
             if (uiRole(msg) !== "system") { i++; continue; }
             // Detect call START precisely: "发起了语音通话" / "发起了视频通话"
             const isVoiceStart = msg.content.includes("发起了语音通话");
@@ -5403,9 +5421,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 // 与上一条消息隔得较远，用时间提前截断反而会漏掉真正的终点。
                 let endIdx = -1;
                 let duration = "";
-                for (let j = i + 1; j < projectedMessages.length; j++) {
-                    if (uiRole(projectedMessages[j]) !== "system") continue;
-                    const c = projectedMessages[j].content;
+                for (let j = i + 1; j < allStored.length; j++) {
+                    if (uiRole(allStored[j]) !== "system") continue;
+                    const c = allStored[j].content;
                     // Another call start → separate call, stop
                     if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
                     // Call end: 挂断/拒绝/取消（兼容"群语音通话"/"群视频通话"）
@@ -5417,26 +5435,18 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     }
                 }
 
-                // ── 第二阶段：没有显式终点时的兜底边界 ──────────
+                // ── 第二阶段：没有显式终点时的兜底 ──────────────
                 //
                 // 通话被意外中断（App 被杀、崩溃、强杀）时不会写挂断留痕，
-                // 过去 endIdx 停在 -1，整段散开、连「N条消息」都看不到。
-                // 这里改用「最后一条仍算作本次通话的消息」收尾，三种中断情形都能折起来：
-                //   · 后面又打了新电话 → 停在新的「发起」之前
-                //   · 聊到已加载范围的末尾 → 停在这一段末尾
-                //   · 中断后隔了很久才继续聊 → 停在时间断层处
-                // 时间断层这层限制必不可少：没有它，这个分组会把之后每一条
-                // 新消息都永远吸进来（因为没有终点，扫描只会越走越远）。
-                // 优先级 1：用户手动标记的「通话结尾」。
-                //
-                // 自动配对依赖「发起」+「挂断」两条留痕：超长通话的「发起」可能被
-                // 挤出加载窗口，意外中断则压根没写挂断。手动标记给折叠一个确定的
-                // 锚点，比按时间断层猜准得多，所以排在最前面。
-                // 扫描遇下一条「发起」即止，避免把后来的通话也吸进来。
+                // endIdx 停在 -1，整段散开。按优先级依次尝试两种兜底。
                 let interrupted = endIdx === -1;
+
+                // 优先级 1：用户手动标记的「通话结尾」。
+                // 手动标记是明确指定，比按时间猜准得多，所以排在断层之前。
+                // 扫描遇下一条「发起」即止，避免把后来的通话也吸进来。
                 if (interrupted) {
-                    for (let j = i + 1; j < projectedMessages.length; j++) {
-                        const candidate = projectedMessages[j];
+                    for (let j = i + 1; j < allStored.length; j++) {
+                        const candidate = allStored[j];
                         if (uiRole(candidate) === "system") {
                             const c = candidate.content;
                             if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
@@ -5446,17 +5456,17 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     interrupted = endIdx === -1;
                 }
 
-                // 优先级 2：时间断层兜底
+                // 优先级 2：时间断层兜底。
+                // 没有它，找不到终点时扫描会一直往后走，把之后每条新消息都吸进来。
                 if (interrupted) {
                     let fallbackEnd = i;
                     let prevTime = parseTime(msg.createdAt);
-                    for (let j = i + 1; j < projectedMessages.length; j++) {
-                        const candidate = projectedMessages[j];
+                    for (let j = i + 1; j < allStored.length; j++) {
+                        const candidate = allStored[j];
                         const time = parseTime(candidate.createdAt);
                         if (time && prevTime && time - prevTime > CALL_GROUP_MAX_GAP_MS) break;
                         if (time) prevTime = time;
-                        const isSystem = uiRole(candidate) === "system";
-                        if (isSystem) {
+                        if (uiRole(candidate) === "system") {
                             const c = candidate.content;
                             if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
                         }
@@ -5465,17 +5475,66 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     }
                     endIdx = fallbackEnd;
                 }
+
                 if (endIdx > i) {
-                    groups.push({ startId: msg.id, startIdx: i, endIdx, duration, callType, interrupted });
-                    for (let k = i; k <= endIdx; k++) memberSet.add(k);
+                    const memberIds = new Set<string>();
+                    let chatCount = 0;
+                    for (let k = i; k <= endIdx; k += 1) {
+                        memberIds.add(allStored[k].id);
+                        if (uiRole(allStored[k]) !== "system") chatCount += 1;
+                    }
+                    ranges.push({
+                        startMsgId: msg.id,
+                        endMsgId: allStored[endIdx].id,
+                        duration,
+                        callType,
+                        interrupted,
+                        chatCount,
+                        memberIds,
+                    });
                     i = endIdx + 1;
                     continue;
                 }
             }
             i++;
         }
+
+        // ── 映射回当前窗口 ──────────────────────────────
+        //
+        // 区间按全量记录算，但渲染只能用已加载的消息。三种情形：
+        //   · 起点在窗口内 → 折叠条放在起点处（原有行为）
+        //   · 起点不在窗口内（长通话的常见情形）→ 放到窗口内第一条属于该区间的
+        //     消息上，用户一眼就知道「上面还有一段通话」
+        //   · 终点不在窗口内 → 收在窗口内最后一条属于该区间的消息处
+        const realIdOf = (msg: RenderChatMessage): string => msg.displaySourceId || msg.id;
+        const windowRealIds = projectedMessages.map(realIdOf);
+        const groups: { startId: string; startIdx: number; endIdx: number; duration: string; callType: "voice" | "video"; interrupted: boolean; chatCount: number }[] = [];
+        const memberSet = new Set<number>();
+
+        for (const range of ranges) {
+            const indicesInWindow: number[] = [];
+            for (let k = 0; k < projectedMessages.length; k += 1) {
+                if (range.memberIds.has(windowRealIds[k])) indicesInWindow.push(k);
+            }
+            if (indicesInWindow.length === 0) continue;
+            const exactStart = windowRealIds.indexOf(range.startMsgId);
+            const startIdx = exactStart >= 0 ? exactStart : indicesInWindow[0];
+            const endIdx = Math.max(startIdx, indicesInWindow[indicesInWindow.length - 1]);
+            for (const k of indicesInWindow) memberSet.add(k);
+            memberSet.add(startIdx);
+            groups.push({
+                startId: range.startMsgId,
+                startIdx,
+                endIdx,
+                duration: range.duration,
+                callType: range.callType,
+                interrupted: range.interrupted,
+                chatCount: range.chatCount,
+            });
+        }
+
         return { groups, memberSet };
-    }, [projectedMessages]);
+    }, [projectedMessages, session.id]);
 
     const getSelectableStoredMessageId = useCallback((msg: RenderChatMessage): string | null => {
         const id = msg.displaySourceId || msg.id;
@@ -5905,7 +5964,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     if (vcGroup) {
                         const isExpanded = expandedVoiceCallIds.has(vcGroup.startId);
                         const groupMessages = projectedMessages.slice(vcGroup.startIdx, vcGroup.endIdx + 1);
-                        const chatCount = groupMessages.filter(m => uiRole(m) !== "system").length;
+                        // 条数用全量统计（vcGroup.chatCount）：窗口只加载了几十条，
+                        // 按窗口算的话 700 分钟的通话会显示成「12条消息」，严重失真。
+                        const chatCount = vcGroup.chatCount;
                         return (
                             <div key={`vc-${vcGroup.startId}`} className="flex flex-col gap-2">
                                 <div

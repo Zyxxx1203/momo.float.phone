@@ -17,10 +17,10 @@ android {
         minSdk 26
         targetSdk 34
         // versionCode 必须严格递增，否则 Android 拒绝覆盖安装（表现为「应用未安装」）。
-        // 1.0.6：显隐改由 Activity 生命周期驱动；1.0.7：回复条配色逐项自定义。
-        // 1.0.8：浮窗自检与失败留痕（排障用）+ 修 THEME_DEFAULT 编译错误。
-        versionCode 7
-        versionName "1.0.8"
+        // 1.0.7：回复条配色逐项自定义；1.0.8：浮窗自检与失败留痕。
+        // 1.0.9：修 TransactionTooLargeException（头像经 Intent 撑爆 Binder 上限）。
+        versionCode 8
+        versionName "1.0.9"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 

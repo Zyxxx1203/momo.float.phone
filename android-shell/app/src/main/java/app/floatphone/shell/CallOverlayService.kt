@@ -31,6 +31,7 @@ import androidx.core.app.NotificationCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -163,6 +164,31 @@ class CallOverlayService : Service() {
         const val EXTRA_AVATAR = "avatar"
         const val EXTRA_META = "meta"
         const val EXTRA_CALL_ID = "call_id"
+
+        /**
+         * 头像经 Intent 传不过去。
+         *
+         * Binder 事务上限约 1MB，而头像可能是几 MB 的 data URL（base64 还要再涨 1/3），
+         * 直接 putExtra 会抛 TransactionTooLargeException，服务压根起不来——
+         * 表现就是「浮窗不出现」，而失败原因只有翻诊断才看得到。
+         * 这里把内联头像落成 cacheDir 里的文件，Intent 只带路径。
+         *
+         * http(s) 直链与已是路径的值原样返回。
+         */
+        fun prepareAvatarRef(context: Context, avatar: String): String {
+            val value = avatar.trim()
+            if (value.isEmpty()) return ""
+            if (!value.startsWith("data:image/")) return value
+            return runCatching {
+                val comma = value.indexOf(',')
+                if (comma < 0) return@runCatching ""
+                val bytes = Base64.decode(value.substring(comma + 1), Base64.DEFAULT)
+                // 固定文件名：每次覆盖，不会在缓存里越堆越多
+                val file = File(context.cacheDir, "call_overlay_avatar.img")
+                file.writeBytes(bytes)
+                file.absolutePath
+            }.getOrDefault("")
+        }
         /** 网页传来的「已通话秒数」——浮窗是切出去才建的，不能从 0 自己数 */
         const val EXTRA_ELAPSED = "elapsed"
 
@@ -808,13 +834,14 @@ class CallOverlayService : Service() {
         }
     }
 
-    /** 拉取头像（data: 内联或 http(s) 直链），失败退回纯色底。 */
+    /** 拉取头像（本地文件路径 / data: 内联 / http(s) 直链），失败退回纯色底。 */
     private fun refreshAvatarAsync() {
         val url = avatarUrl.trim()
         if (url.isEmpty() || url == lastAvatarUrl) return
         lastAvatarUrl = url
-        if (url.startsWith("data:image/")) {
-            avatarBitmap = decodeDataUrl(url)
+        // 本地文件与 data URL 都能立刻解出来，不必开线程
+        if (url.startsWith("data:image/") || !url.startsWith("http")) {
+            avatarBitmap = decodeLocalAvatar(url)
             main.post { renderOverlay() }
             return
         }
@@ -842,6 +869,22 @@ class CallOverlayService : Service() {
         if (!header.contains("base64", ignoreCase = true)) return@runCatching null
         val bytes = Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT)
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }.getOrNull()
+
+    /**
+     * 解析本地头像：cacheDir 里的文件，或仍以 data URL 形式传进来的（老路径）。
+     * 解码时按需降采样——浮窗最宽才 320dp，没必要为一个小窗解一张几千万像素的图。
+     */
+    private fun decodeLocalAvatar(pathOrDataUrl: String): Bitmap? = runCatching {
+        if (pathOrDataUrl.startsWith("data:image/")) return@runCatching decodeDataUrl(pathOrDataUrl)
+        val file = File(pathOrDataUrl)
+        if (!file.exists()) return@runCatching null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(pathOrDataUrl, bounds)
+        if (bounds.outWidth <= 0) return@runCatching null
+        var sample = 1
+        while (bounds.outWidth / sample > 1024) sample *= 2
+        BitmapFactory.decodeFile(pathOrDataUrl, BitmapFactory.Options().apply { inSampleSize = sample })
     }.getOrNull()
 
     // ── 拖动 ──

@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         val SITE_URL: String = BuildConfig.SITE_URL
-        const val VERSION = "1.0.8"
+        const val VERSION = "1.0.9"
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
@@ -530,8 +530,11 @@ class MainActivity : AppCompatActivity() {
             // 切到后台只是把已有窗口显示出来（showCallOverlay），不再从后台启动
             // 前台服务——Android 12+ 会拒绝，浮窗于是「有时不弹」。
             if (!CallOverlayService.canDraw(this@MainActivity)) return false
+            // 头像落成缓存文件再传：内联 data URL 可能有几 MB，塞进 Intent 会抛
+            // TransactionTooLargeException，服务根本起不来（浮窗不出现的真凶）。
+            val avatarRef = CallOverlayService.prepareAvatarRef(this@MainActivity, avatar)
             // 交给 start 判断成败：它会把失败原因记进诊断，网页侧据此提示而不是静默
-            return CallOverlayService.start(this@MainActivity, name, avatar, meta, callId, elapsedSeconds)
+            return CallOverlayService.start(this@MainActivity, name, avatarRef, meta, callId, elapsedSeconds)
         }
 
         /** 浮窗内部状态快照（JSON），网页诊断面板直接展示。 */
@@ -553,7 +556,9 @@ class MainActivity : AppCompatActivity() {
         /** 更新浮窗显示（改名/换头像/刷新时长），不重建窗口。 */
         @JavascriptInterface
         fun updateCallOverlay(name: String, avatar: String, meta: String, elapsedSeconds: Int) {
-            runCatching { CallOverlayService.update(this@MainActivity, name, avatar, meta, elapsedSeconds) }
+            // 同样走缓存文件：update 也是 Intent，一样受 Binder 事务上限约束
+            val avatarRef = CallOverlayService.prepareAvatarRef(this@MainActivity, avatar)
+            runCatching { CallOverlayService.update(this@MainActivity, name, avatarRef, meta, elapsedSeconds) }
         }
 
         /** 收掉浮窗（挂断或退回全屏时调用）。 */

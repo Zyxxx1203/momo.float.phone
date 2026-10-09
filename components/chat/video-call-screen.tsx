@@ -9,6 +9,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { cancelFollowUp } from "@/lib/follow-up-service";
+import { persistCallAudio, releaseCallAudioRef } from "@/lib/call-audio-storage";
 import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
@@ -412,10 +413,12 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── AI response processing ──
 
-    const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[]; messageIds: string[] } => {
+    const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[]; messageIds: string[]; speechMessageIds: string[] } => {
         // 本回落进聊天记录的消息 id：字幕带着它们，编辑 / 删除 / 重新生成
         // 才能定位到真实记录——只改屏幕会被下次重渲染覆盖。
         const createdMessageIds: string[] = [];
+        // 本轮真正「被朗读」的消息 id：原音留档只挂在这些消息上（贴纸红包这类没台词的不挂）。
+        const speechMessageIds: string[] = [];
         const previousState = getLatestCharacterStateValues(session.contactId);
 
         const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
@@ -458,6 +461,11 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             );
             messagesRef.current = [...messagesRef.current, ...newMsgs];
             createdMessageIds.push(...newMsgs.map(m => m.id));
+            chatParts.forEach((part, idx) => {
+                if (!part.mediaType && part.content.trim() && newMsgs[idx]) {
+                    speechMessageIds.push(newMsgs[idx].id);
+                }
+            });
         }
         window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
 
@@ -465,7 +473,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             .filter(p => !p.mediaType && p.content.trim())
             .map(p => p.content);
 
-        return { cleanParts, stateValues, messageIds: createdMessageIds };
+        return { cleanParts, stateValues, messageIds: createdMessageIds, speechMessageIds };
     }, [session.id, session.contactId]);
 
     // ── Full conversation turn ──────────────────────
@@ -492,7 +500,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             }));
             if (stateRef.current === "ENDED") return;
 
-            const { cleanParts, messageIds } = processAIResponse(aiResponseText);
+            const { cleanParts, messageIds, speechMessageIds } = processAIResponse(aiResponseText);
             const displayText = cleanParts.join("\n");
             const speechText = stripBilingualForSpeech(displayText);
 
@@ -521,6 +529,21 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     if (audioBlob && !isSpeakerMutedRef.current) {
                         // 存一份给「重听」用：不然每次重听都要重新调一次 TTS API
                         cacheAudio(subtitleId, audioBlob);
+                        // 落库留档：与语音通话屏同一套处理，音频进媒体库、引用写进消息，
+                        // 「通话统计」才能复听原音（宿主代播支持 media-store:// 引用）。
+                        void persistCallAudio(audioBlob, {
+                            sessionId: session.id,
+                            characterId: session.contactId,
+                        }).then(ref => {
+                            if (!ref) return;
+                            const targetId = speechMessageIds[0];
+                            if (!targetId) return;
+                            const target = loadChatMessages(session.id).find(item => item.id === targetId);
+                            if (!target) return;
+                            updateChatMessage(targetId, {
+                                mediaData: { ...(target.mediaData || {}), callAudioRef: ref },
+                            });
+                        });
                         const { promise, abort } = playCallAudio(audioBlob);
                         audioAbortRef.current = abort;
                         await promise;
@@ -712,8 +735,23 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         }
     }, [session.contactId, playCallAudio, cacheAudio]);
 
+    /**
+     * 清掉若干消息上的原音留档（编辑 / 删除 / 重新生成后，音频与文字已经对不上）。
+     * 与语音通话屏同一套处理。
+     */
+    const releaseAudioRefs = useCallback((messageIds: string[] | undefined) => {
+        for (const id of messageIds ?? []) {
+            const msg = messagesRef.current.find(item => item.id === id);
+            const ref = msg?.mediaData?.callAudioRef;
+            if (!ref) continue;
+            void releaseCallAudioRef(ref);
+            updateChatMessage(id, { mediaData: { ...msg.mediaData, callAudioRef: undefined } });
+        }
+    }, []);
+
     /** 编辑一句：改写真实记录 + 同步字幕文本，并作废这句的音频缓存。 */
     const handleEditSubtitle = useCallback((sub: SubtitleEntry, next: string) => {
+        releaseAudioRefs(sub.messageIds);
         const ids = sub.messageIds ?? [];
         if (ids.length > 0) updateChatMessage(ids[0], { content: next });
         setSubtitles(prev => prev.map(item => item.id === sub.id
@@ -726,6 +764,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     /** 删除一句：先删真实记录，再摘掉字幕。 */
     const handleDeleteSubtitle = useCallback((sub: SubtitleEntry) => {
+        releaseAudioRefs(sub.messageIds);
         for (const id of sub.messageIds ?? []) deleteChatMessage(id);
         setSubtitles(prev => prev.filter(item => item.id !== sub.id));
         audioCacheRef.current.delete(sub.id);
@@ -740,6 +779,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
      */
     const handleRegenerateSubtitle = useCallback((sub: SubtitleEntry) => {
         if (stateRef.current !== "IDLE") return;
+        releaseAudioRefs(sub.messageIds);
         for (const id of sub.messageIds ?? []) deleteChatMessage(id);
         setSubtitles(prev => prev.filter(item => item.id !== sub.id));
         audioCacheRef.current.delete(sub.id);

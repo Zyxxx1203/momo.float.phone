@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import { generateGroupChatCompletion } from "@/lib/group-chat-engine";
 import { parseAIResponse } from "@/lib/rich-message-parser";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { cancelFollowUp } from "@/lib/follow-up-service";
+import { persistCallAudio } from "@/lib/call-audio-storage";
 import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
@@ -312,6 +313,19 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                         const audioBlob = await synthesizeSpeech(speechText, voiceConfig);
                         if (stateRef.current === "ENDED") return;
                         if (audioBlob) {
+                            // 落库留档：音频进媒体库，引用写进这条消息，供「通话统计」复听原音。
+                            // 群通话每个角色各自合成（音色也可能不同），所以逐条挂、不合并。
+                            void persistCallAudio(audioBlob, {
+                                sessionId: session.id,
+                                characterId: r.characterId,
+                            }).then(ref => {
+                                if (!ref) return;
+                                const target = loadChatMessages(session.id).find(item => item.id === aiMsg.id);
+                                if (!target) return;
+                                updateChatMessage(aiMsg.id, {
+                                    mediaData: { ...(target.mediaData || {}), callAudioRef: ref },
+                                });
+                            });
                             const { promise, abort } = playCallAudio(audioBlob);
                             audioAbortRef.current = abort;
                             await promise;

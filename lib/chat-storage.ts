@@ -226,6 +226,12 @@ export type ChatMessage = {
         xiaohongshuCoverIcon?: string;
         xiaohongshuTone?: string;
         callDuration?: string;    // 通话时长（如 05:23）
+        /**
+         * 通话语音留档引用（media-store://…）。通话屏把角色这句的原音存进媒体库后写在
+         * 这里，供「通话统计」直接复听原音，不必重新合成（音色/语气才和当时一致）。
+         * 老消息没有这个字段。媒体库清理由 lib/call-audio-storage.ts 的保留策略负责。
+         */
+        callAudioRef?: string;
         voiceDuration?: number;   // 语音条时长（秒）
         synthesizedFromText?: string; // 语音条当前音频对应的合成文本
         memoryContent?: string;   // 记忆写入内容

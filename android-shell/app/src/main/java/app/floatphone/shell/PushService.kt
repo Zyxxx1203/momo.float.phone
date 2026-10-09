@@ -7,8 +7,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
+import android.util.Base64
 import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
 import okhttp3.MediaType.Companion.toMediaType
@@ -51,6 +54,12 @@ class PushService : Service() {
     private val client = OkHttpClient.Builder()
         .pingInterval(25, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
+
+    /** 拉取远程头像用；超时压短，拿不到就退回默认图标，绝不能拖住通知。 */
+    private val avatarClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
     private var socket: WebSocket? = null
@@ -223,7 +232,7 @@ class PushService : Service() {
                         }.isSuccess
                         if (shown) return
                     }
-                    showMessageNotification(title, text2, body.optString("sessionId"))
+                    showMessageNotification(title, text2, body.optString("sessionId"), body.optString("avatar"))
                 }
             }
 
@@ -365,8 +374,8 @@ class PushService : Service() {
         getSystemService(NotificationManager::class.java).notify(CallAlert.NOTIF_MISSED_ID, notification)
     }
 
-    private fun showMessageNotification(title: String, body: String, sessionId: String? = null) {
-        val notification = NotificationCompat.Builder(this, CH_MESSAGES)
+    private fun showMessageNotification(title: String, body: String, sessionId: String? = null, avatarUrl: String? = null) {
+        val builder = NotificationCompat.Builder(this, CH_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(title)
             .setContentText(body)
@@ -374,10 +383,48 @@ class PushService : Service() {
             .setAutoCancel(true)
             .setContentIntent(contentIntent(sessionId))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
-        getSystemService(NotificationManager::class.java).notify(notifId++, notification)
+        // 角色头像当通知大图标（服务端随广播带的 avatar：data URL 或直链）。
+        // 取不到就退回默认图标——头像只是锦上添花，绝不能拖住或搞丢通知。
+        loadAvatarBitmap(avatarUrl)?.let { builder.setLargeIcon(it) }
+        getSystemService(NotificationManager::class.java).notify(notifId++, builder.build())
         if (notifId > 400) notifId = 100
     }
+
+    /**
+     * 把广播里的头像串变成通知大图标。支持 data:image/... 内联与 http(s) 直链；
+     * 解析失败或超时一律返回 null，调用方退回应用图标。
+     */
+    private fun loadAvatarBitmap(avatarUrl: String?): Bitmap? {
+        val value = avatarUrl?.trim().orEmpty()
+        if (value.isEmpty()) return null
+        // 老壳不认识 avatar 字段时这里是空串，自然跳过；异常也绝不能影响通知。
+        return runCatching {
+            if (value.startsWith("data:image/")) decodeDataUrlBitmap(value) else fetchRemoteAvatar(value)
+        }.getOrNull()
+    }
+
+    /** 解 data:image/png;base64,xxxx 形式的内联头像。 */
+    private fun decodeDataUrlBitmap(dataUrl: String): Bitmap? = runCatching {
+        val comma = dataUrl.indexOf(',')
+        if (comma < 0) return@runCatching null
+        val header = dataUrl.substring(0, comma)
+        if (!header.contains("base64", ignoreCase = true)) return@runCatching null
+        val bytes = Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }.getOrNull()
+
+    /** 拉取远程头像。可能是站点上的受保护资源，这里带上 WebView 的登录 Cookie；失败返回 null。 */
+    private fun fetchRemoteAvatar(url: String): Bitmap? = runCatching {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return@runCatching null
+        val builder = Request.Builder().url(url)
+        val cookie = CookieManager.getInstance().getCookie(url)
+        if (!cookie.isNullOrEmpty()) builder.header("Cookie", cookie)
+        avatarClient.newCall(builder.build()).execute().use { response ->
+            if (!response.isSuccessful) return@runCatching null
+            val bytes = response.body?.bytes() ?: return@runCatching null
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }
+    }.getOrNull()
 
     private fun sleepSec(sec: Long) {
         runCatching { Thread.sleep(sec * 1000) }

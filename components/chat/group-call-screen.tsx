@@ -7,6 +7,7 @@ import { generateGroupChatCompletion } from "@/lib/group-chat-engine";
 import { parseAIResponse } from "@/lib/rich-message-parser";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { cancelFollowUp } from "@/lib/follow-up-service";
+import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
 import { isCallRecordingSupported, resolveCloudSttConfig } from "@/lib/stt-cloud";
@@ -184,6 +185,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
     // ── Init ─────────────────────────────────────────
     useEffect(() => {
         cancelFollowUp(session.id);
+        // 通话期间不打扰：撤掉已挂在服务端的离线预约（详见 voice-call-screen）
+        void suspendBailoutsForCall(session.id);
         const ui = resolveUserIdentity(undefined, "group_chat");
         userNameRef.current = ui?.name || "你";
         userAvatarRef.current = resolveChatUserAvatar(session, ui?.avatarUrl) || null;

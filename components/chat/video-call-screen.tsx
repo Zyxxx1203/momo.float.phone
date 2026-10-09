@@ -9,6 +9,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { cancelFollowUp } from "@/lib/follow-up-service";
+import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
 import { isCallRecordingSupported, resolveCloudSttConfig } from "@/lib/stt-cloud";
@@ -347,6 +348,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     useEffect(() => {
         cancelFollowUp(session.id);
+        // 通话期间不打扰：撤掉已挂在服务端的离线预约（详见 voice-call-screen）
+        void suspendBailoutsForCall(session.id);
 
         const ui = resolveUserIdentity(session.contactId, "chat");
         userNameRef.current = ui?.name || "你";

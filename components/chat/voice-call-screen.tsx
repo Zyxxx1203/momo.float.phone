@@ -9,6 +9,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { generateChatCompletion, flattenCompletionResult, ChatEngineError } from "@/lib/chat-engine";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { cancelFollowUp } from "@/lib/follow-up-service";
+import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
 import { isCallRecordingSupported, resolveCloudSttConfig } from "@/lib/stt-cloud";
@@ -311,6 +312,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     useEffect(() => {
         cancelFollowUp(session.id);
+        // 通话期间不打扰：撤掉这个会话已挂在服务端的离线预约。
+        // 通话里系统看不见你的文字回复，会误判成沉默、到点弹一条主动消息
+        //（只在通知里出现，聊天室里没有对应记录——人明明在电话里聊着）。
+        void suspendBailoutsForCall(session.id);
 
         // Resolve user name
         const ui = resolveUserIdentity(session.contactId, "chat");

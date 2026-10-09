@@ -440,6 +440,29 @@ export async function cancelBailoutPrefix(triggerPrefix: string, excludeKey?: st
     }).catch(() => undefined);
 }
 
+/**
+ * 通话开始/结束时处理这个会话的离线预约。
+ *
+ * 为什么需要：离线任务（冷场重连 / 追问）按「用户最后一条文字消息 + 间隔」
+ * 排期。通话期间用户不写字，但角色一直在说话——系统看不见，仍会按时生成一条
+ * 主动消息弹通知，只在通知里出现、聊天室里没有对应记录，人明明在电话里聊着
+ * （用户实报）。
+ *
+ * arm* 里的门控只能拦住「通话期间新挂的」，通话开始前就已经挂在服务端的
+ * 仍会到点触发，所以这里显式撤销。通话结束后不必主动重挂：等用户下次发消息
+ * 或下一轮巡检，规则会按新的沉默时间自然重排。
+ */
+export async function suspendBailoutsForCall(sessionId: string): Promise<void> {
+    if (!bailoutEnabled()) return;
+    await cancelBailoutPrefix(`followup:${sessionId}:`);
+    cancelBailoutKey(`reply:${sessionId}`);
+    // 冷场重连的键是 idle:<ruleId>:<序号>，不带会话 id，得按规则找到它
+    for (const rule of loadIdleReconnectRules()) {
+        if (rule.sessionId !== sessionId) continue;
+        await cancelBailoutPrefix(`idle:${rule.id}:`);
+    }
+}
+
 /** 把本地安静时段设置编成服务端可用的窗口（分钟制 + 时区偏移），未启用返回 null。 */
 function buildQuietWindowMeta(): { startMin: number; endMin: number; tzOffsetMin: number } | null {
     const match = loadPushQuietHours().match(/^(\d{1,2}):(\d{2})\s*[-~—]\s*(\d{1,2}):(\d{2})$/);

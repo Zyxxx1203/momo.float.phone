@@ -5514,11 +5514,25 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     // 通话期间在聊天室发的消息与卡片（origin 为 chat）不收，
                     // 留在时间流里正常显示。此前折叠按时间区间无差别全收，
                     // 于是这些消息也被藏进折叠条（用户实报）。
+                    // 老记录退回「宽松」判定（用户选定）。
+                    //
+                    // origin 是后加的字段：更新之前的通话消息没有来源标记，和新版
+                    // 聊天室消息在数据上无法区分。整段都没有标记时（纯旧记录）按时间
+                    // 区间收全部对话，让老通话也能折起来、有正确计数——代价是那段
+                    // 时期在聊天室发的消息也会被一并收起（旧记录无法两全，已知取舍）。
+                    //
+                    // 只要区间里出现任一条带标记的消息，就说明这段通话发生在新版本，
+                    // 严格只收 origin === "call"：聊天室消息一律留在时间流。
+                    const rangeHasOrigin = allStored
+                        .slice(i, endIdx + 1)
+                        .some(m => m.origin !== undefined);
                     const memberIds = new Set<string>();
                     let chatCount = 0;
                     for (let k = i; k <= endIdx; k += 1) {
                         const stored = allStored[k];
-                        if (stored.origin !== "call" && !isCallSysMsg(stored)) continue;
+                        const isCallMember = stored.origin === "call"
+                            || (!rangeHasOrigin && uiRole(stored) !== "system");
+                        if (!isCallMember && !isCallSysMsg(stored)) continue;
                         memberIds.add(stored.id);
                         if (uiRole(stored) !== "system") chatCount += 1;
                     }
@@ -6084,10 +6098,6 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                         {vcGroup.callType === "video" ? "视频通话" : "语音通话"}
                                         {vcGroup.duration ? ` · 全程${vcGroup.duration}` : ""}
                                         {` · 共${vcGroup.totalChatCount}条`}
-                                        {/* 临时构建标记：用来确认浏览器实际跑的是哪一版代码。
-                                            看不到「v3」就说明加载的是旧包（部署没更新 / Service Worker 缓存），
-                                            而不是这段逻辑没修。定位完即删。 */}
-                                        {" · v3"}
                                         {vcGroup.segmentCount > 1 ? ` · 第${vcGroup.segmentIndex}/${vcGroup.segmentCount}段` : ""}
                                         {/*「无结束记录」只标在最后一段：前面几段后面还有内容，
                                            标在每段上会让人以为每段都没结束。*/}

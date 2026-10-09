@@ -7,6 +7,7 @@ import { bgSetInterval, bgSetTimeout } from "./bg-timer";
 import { BAILOUT_DIRTY_EVENT } from "./bailout-dirty";
 import { BAILOUT_CANCEL_EVENT, type BailoutCancelDetail } from "./bailout-cancel";
 import { buildChatPromptMessages } from "./chat-engine";
+import { isCallActiveForSession } from "./call-session-store";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
 import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
 import { hasAccountPushSubscription, isShellEnvironment, isWithinPushQuietHours, loadPushQuietHours, peekAccountPushSubscribed } from "./push-client";
@@ -306,6 +307,10 @@ export async function armFollowUpBailout(
         if (isWithinPushQuietHours(fireAt + FOLLOWUP_BAILOUT_GRACE_MS)) return; // 安静时段不打扰
         const session = loadChatSessions().find(s => s.id === sessionId);
         if (!session || session.isGroup) return; // 第一期只覆盖单聊追问
+        // 正在通话中：不挂追问兜底。通话期间角色其实一直在说话，但系统看不到
+        // 你的文字回复，会按沉默判成「对方没回」，到点生成一条主动消息弹通知——
+        // 人明明在电话里聊着（用户实报）。通话本身就是最强的「在场」信号。
+        if (isCallActiveForSession(sessionId)) return;
         const latestMessages = loadChatMessages(sessionId);
         const count = prevCount + 1;
         const messagesWithHint = buildFollowUpSilenceMessages(session, latestMessages, fireAt);
@@ -454,6 +459,9 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
         if (!session || session.isGroup || session.contactId !== rule.characterId) return { ok: false, reason: "找不到对应的单聊会话" };
+        // 正在通话中：不挂冷场重连。通话期间系统看不到文字回复，会误判成用户
+        // 沉默了、按规则发来主动消息，只在通知里冒出来（用户实报）。
+        if (isCallActiveForSession(session.id)) return { ok: false, reason: "会话正在通话中" };
         const history = loadChatMessages(session.id);
         const lastUser = [...history].reverse().find(m => m.role === "user");
         if (!lastUser) return { ok: false, reason: "这个会话还没有你的消息，无法计算沉默时间" };

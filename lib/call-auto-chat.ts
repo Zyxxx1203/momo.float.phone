@@ -114,3 +114,45 @@ export function randomAutoChatDelaySeconds(config: CallAutoChatConfig): number {
     if (max <= min) return min;
     return min + Math.random() * (max - min);
 }
+
+// ── 运行状态：给通话设置面板看「现在到底在等什么」──────────────────────────
+//
+// 手机上开不了控制台（安卓壳里更没有 F12），所以心跳把每秒的快照登记在这里，
+// 通话屏那个「自动搭话」面板读它显示。诊断信息一样，只是换了个能看见的地方。
+
+export type CallAutoChatStatus = {
+    /** 通话状态：IDLE（谁也没在说）/ 其它 */
+    state: string;
+    /** 下次开口的时刻（毫秒时间戳）；0 = 尚未排期 */
+    deadlineAt: number;
+    /** 最近一次心跳的墙钟时间；0 = 心跳已停表。与当前时间差太大 = 定时器被系统冻结 */
+    tickedAt: number;
+    /** 本次通话已自动开口条数 */
+    turns: number;
+    /** 条数上限；0 = 不限 */
+    maxTurns: number;
+    /** 连续空转轮数 */
+    emptyTurns: number;
+    /** 面板顶部那句话：当前在等什么 / 为什么没开口 */
+    reason: string;
+    /** 最近几条事件（新的在后），给看不到控制台的手机用 */
+    events: string[];
+};
+
+/** 当前跑着的自动搭话把状态读取器登记在这。三个通话屏同一时刻只跑一份，单一槽位够用 */
+let statusReader: (() => CallAutoChatStatus) | null = null;
+
+/** 登记状态读取器（每次进通话 / 设置变更后重新登记） */
+export function publishCallAutoChatStatus(reader: () => CallAutoChatStatus): void {
+    statusReader = reader;
+}
+
+/** 注销：只有当前登记的确实是它时才清空，免把后挂载的实例顶掉 */
+export function clearCallAutoChatStatusReader(reader: () => CallAutoChatStatus): void {
+    if (statusReader === reader) statusReader = null;
+}
+
+/** 读当前状态；没在通话（或自动搭话没跑）时返回 null */
+export function readCallAutoChatStatus(): CallAutoChatStatus | null {
+    return statusReader ? statusReader() : null;
+}

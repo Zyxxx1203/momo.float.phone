@@ -14,7 +14,10 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 
 import {
     type CallAutoChatConfig,
+    type CallAutoChatStatus,
+    clearCallAutoChatStatusReader,
     loadCallAutoChatConfig,
+    publishCallAutoChatStatus,
     randomAutoChatDelaySeconds,
     saveCallAutoChatConfig,
 } from "@/lib/call-auto-chat";
@@ -77,6 +80,11 @@ export function useCallAutoChat({
     const emptyTurnsRef = useRef(0);
     // 重复原因的日志节流：角色连说十几秒时，「有人在说」不必每秒打一条
     const lastReasonRef = useRef<{ key: string; at: number }>({ key: "", at: 0 });
+    // 最近几条事件，供通话设置面板显示（手机上开不了控制台）
+    const eventsRef = useRef<string[]>([]);
+    // 最近一次心跳的墙钟时间、当前状态说明：面板靠这两项判断「心跳还活着吗、在等什么」
+    const tickedAtRef = useRef(0);
+    const reasonRef = useRef("尚未开始");
 
     /** 同一原因 5 秒内只留一条日志（正常倒计时不受影响，仍逐秒打） */
     const logReason = (key: string, message: string) => {
@@ -86,6 +94,25 @@ export function useCallAutoChat({
         lastReasonRef.current = { key, at: now };
         debugLog(message);
     };
+
+    /** 记一条事件：控制台日志 + 面板事件流（都留，一个给电脑一个给手机） */
+    const pushEvent = (message: string) => {
+        const line = `${new Date().toLocaleTimeString("zh-CN", { hour12: false })} ${message}`;
+        eventsRef.current = [...eventsRef.current, line].slice(-5);
+        debugLog(message);
+    };
+
+    /** 打包一份当前快照。通话屏的面板每 500ms 读一次，只用于显示，不参与判定 */
+    const buildStatus = useCallback((): CallAutoChatStatus => ({
+        state: callStateRef.current,
+        deadlineAt: deadlineRef.current,
+        tickedAt: tickedAtRef.current,
+        turns: turnsRef.current,
+        maxTurns: configRef.current.maxTurns,
+        emptyTurns: emptyTurnsRef.current,
+        reason: reasonRef.current,
+        events: eventsRef.current,
+    }), [callStateRef]);
 
     /**
      * 安排下一次开口。
@@ -107,7 +134,7 @@ export function useCallAutoChat({
         turnsRef.current = 0;
         emptyTurnsRef.current = 0;
         deadlineRef.current = 0;
-        debugLog("你开口了：本轮计数与空转清零，等待重排");
+        pushEvent("你开口了：本轮计数与空转清零");
     }, []);
 
     /**
@@ -120,7 +147,7 @@ export function useCallAutoChat({
         const next = deadlineRef.current
             ? `，下次等待 ${((deadlineRef.current - Date.now()) / 1000).toFixed(1)}s`
             : "（未排期：开关关闭或通话已结束）";
-        debugLog(`角色说完一轮（${produced ? "有内容" : "空转"}）${next} 空转=${emptyTurnsRef.current}`);
+        pushEvent(`角色开口一轮（${produced ? "有内容" : "空转"}）${next}`);
     }, [schedule]);
 
     /** 改设置并即时生效（存盘 + 广播给其它页面），顺带把节拍复位 */
@@ -143,10 +170,10 @@ export function useCallAutoChat({
             deadlineRef.current = next.enabled
                 ? Date.now() + randomAutoChatDelaySeconds(next) * 1000
                 : 0;
-            debugLog(
+            pushEvent(
                 next.enabled
-                    ? `设置变更：间隔 ${next.minSeconds}~${next.maxSeconds}s`
-                      + `，上限 ${next.maxTurns > 0 ? `${next.maxTurns} 条` : "不限"}，已重排`
+                    ? `设置变更：间隔 ${next.minSeconds}~${next.maxSeconds}s，`
+                      + `上限 ${next.maxTurns > 0 ? `${next.maxTurns} 条` : "不限"}，已重排`
                     : "设置变更：自动搭话已关闭",
             );
         }
@@ -158,25 +185,29 @@ export function useCallAutoChat({
     useEffect(() => {
         if (!active) {
             deadlineRef.current = 0;
-            debugLog("通话不在进行中，心跳停表");
+            pushEvent("通话不在进行中，心跳停表");
             return;
         }
         if (!config.enabled) {
             deadlineRef.current = 0;
-            debugLog("自动搭话已关闭，心跳停表");
+            pushEvent("自动搭话已关闭，心跳停表");
             return;
         }
+        // 登记状态读取器：挂在通话屏上的设置面板从这里读，不用改三个通话屏
+        publishCallAutoChatStatus(buildStatus);
         // 刚开启（或刚进通话）：从当下起算一个随机间隔
         if (!deadlineRef.current) {
             const firstDelay = randomAutoChatDelaySeconds(config);
             deadlineRef.current = Date.now() + firstDelay * 1000;
-            debugLog(
+            pushEvent(
                 `心跳启动：首次等待 ${firstDelay.toFixed(1)}s`
                 + `（间隔 ${config.minSeconds}~${config.maxSeconds}s，`
                 + `上限 ${config.maxTurns > 0 ? `${config.maxTurns} 条` : "不限"}）`,
             );
         }
+        tickedAtRef.current = Date.now();
         const timer = window.setInterval(() => {
+            tickedAtRef.current = Date.now();
             const current = configRef.current;
             if (!current.enabled) return;
             const limit = current.maxTurns;
@@ -191,25 +222,32 @@ export function useCallAutoChat({
             // 不触发的每一档原因都写出来——只看「没反应」是猜不出卡在哪的
             const head = `状态=${state} 剩余=${remain} 空转=${emptyTurnsRef.current} 本轮=${turns}`;
             if (state !== "IDLE") {
+                reasonRef.current = "角色或你正在说话，等安静下来再开口";
                 logReason(`state:${state}`, `${head} → 有人在说，本轮不触发`);
                 return;
             }
             if (limit > 0 && turnsRef.current >= limit) {
+                reasonRef.current = `已达本次通话上限（${limit} 条），你开口后才重新计数`;
                 logReason("limit", `${head} → 已达本次通话上限，等你开口才重新计数`);
                 return;
             }
             if (!deadline || Date.now() < deadline) {
+                reasonRef.current = "静默倒计时中";
                 debugLog(`${head} → 等待中`);
                 return;
             }
             turnsRef.current += 1;
             deadlineRef.current = 0;
-            debugLog(`${head} → 触发自动搭话（第 ${turnsRef.current} 条）`);
+            reasonRef.current = "刚触发，正在等角色回应";
+            pushEvent(`触发自动搭话（第 ${turnsRef.current} 条）`);
             beforeTriggerRef.current?.();
             onTriggeredRef.current?.();
             runTurnRef.current();
         }, 1000);
-        return () => window.clearInterval(timer);
+        return () => {
+            window.clearInterval(timer);
+            clearCallAutoChatStatusReader(buildStatus);
+        };
         // callStateRef / runTurn 走 ref，不进依赖
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [active, config]);

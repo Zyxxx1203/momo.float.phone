@@ -226,6 +226,8 @@ export type ChatMessage = {
         xiaohongshuCoverIcon?: string;
         xiaohongshuTone?: string;
         callDuration?: string;    // 通话时长（如 05:23）
+        /** 用户手动标记的「通话开头」(右键菜单)。老通话留痕丢失时用它圈定区间起点。 */
+        callStartMarker?: boolean;
         /**
          * 通话语音留档引用（media-store://…）。通话屏把角色这句的原音存进媒体库后写在
          * 这里，供「通话统计」直接复听原音，不必重新合成（音色/语气才和当时一致）。

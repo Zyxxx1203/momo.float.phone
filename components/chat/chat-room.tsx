@@ -5115,6 +5115,26 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         showChatToast(marking ? "已标记为通话结尾" : "已取消通话结尾标记");
     }, [session.id, syncMessagesFromStorage]);
 
+    /**
+     * 手动标记 / 取消「通话开头」。
+     *
+     * 与结尾标记配对使用：老通话的「发起了语音通话」留痕可能已经不在（被删、
+     * 或从未写入），只靠留痕永远找不到起点、整段折不起来。手动标一条作为开头，
+     * 配合结尾标记就能把任意一段手工圈成通话。
+     */
+    const toggleCallStartMarker = useCallback((msg: ChatMessage | RenderChatMessage) => {
+        const id = getStoredActionMessageId(msg);
+        const target = loadChatMessages(session.id).find(m => m.id === id);
+        if (!target) return;
+        const nextData = { ...(target.mediaData || {}) };
+        const marking = nextData.callStartMarker !== true;
+        if (marking) nextData.callStartMarker = true;
+        else delete nextData.callStartMarker;
+        updateMessageMediaData(id, nextData);
+        syncMessagesFromStorage();
+        showChatToast(marking ? "已标记为通话开头" : "已取消通话开头标记");
+    }, [session.id, syncMessagesFromStorage]);
+
     /** Reusable context menu for user/assistant bubbles */
     const renderBubbleContextMenu = (m: ChatMessage, options?: { allowMultiSelect?: boolean }) => {
         const storedMessageId = getStoredActionMessageId(m);
@@ -5157,6 +5177,9 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     {m.role === "assistant" && (
                         <button onClick={() => handleRetry(storedMessageId)} className="ctx-menu-btn ctx-menu-btn-danger">重试以下</button>
                     )}
+                    <button onClick={() => { toggleCallStartMarker(m); setActiveMessageId(null); }} className="ctx-menu-btn">
+                        {m.mediaData?.callStartMarker ? "取消通话开头" : "设为通话开头"}
+                    </button>
                     <button onClick={() => { toggleCallEndMarker(m); setActiveMessageId(null); }} className="ctx-menu-btn">
                         {m.mediaData?.callEndMarker ? "取消通话结尾" : "设为通话结尾"}
                     </button>
@@ -5441,63 +5464,79 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         let i = 0;
         while (i < allStored.length) {
             const msg = allStored[i];
-            if (uiRole(msg) !== "system") { i++; continue; }
+            // 起点两个来源：系统留痕「发起了语音/视频通话」，或用户手动标的
+            // 「通话开头」（右键菜单）。手动那个是救急用的——起点留痕被删掉、
+            // 或被挤出数据库的老通话，只靠留痕永远折不起来。
+            const isManualStart = msg.mediaData?.callStartMarker === true;
+            if (uiRole(msg) !== "system" && !isManualStart) { i++; continue; }
             // Detect call START precisely: "发起了语音通话" / "发起了视频通话"
             const isVoiceStart = msg.content.includes("发起了语音通话");
             const isVideoStart = msg.content.includes("发起了视频通话");
-            if (isVoiceStart || isVideoStart) {
-                const callType = isVideoStart ? "video" : "voice";
-                const kw = isVideoStart ? "视频通话" : "语音通话";
-                // ── 第一阶段：找显式终点（挂断/拒绝/取消）──────
+            if (isVoiceStart || isVideoStart || isManualStart) {
+                // 手动标的开头本身不带类型信息：往后扫一眼通话留痕定类型，
+                // 扫不到就按语音处理（只是个图标差异）。
+                let callType: "voice" | "video" = isVideoStart ? "video" : "voice";
+                if (isManualStart && !isVoiceStart && !isVideoStart) {
+                    for (let t = i + 1; t < allStored.length; t += 1) {
+                        const probe = allStored[t].content || "";
+                        if (probe.includes("发起了语音通话")) break;
+                        if (probe.includes("发起了视频通话")) { callType = "video"; break; }
+                    }
+                }
+                const kw = callType === "video" ? "视频通话" : "语音通话";
+                // ── 终点判定：手动标记优先，其次挂断留痕 ──────────
                 //
-                // 这一步刻意不受「时间断层」影响：挂断记录可能因为各种原因
-                // 与上一条消息隔得较远，用时间提前截断反而会漏掉真正的终点。
+                // 扫描范围一直走到下一条「发起通话」为止，中途同时留意两件事：
+                //   · 手动标记的结尾（右键「设为通话结尾」）
+                //   · 自动写的挂断/拒绝/取消留痕
+                //
+                // 手动标记优先级更高：它是用户的明确意图，而挂断留痕可能是误留的
+                // （长通话挂了一夜忘了挂、或留痕与真实结束时刻差很远）。过去只把手动
+                // 标记当「挂断留痕不存在时的兜底」，于是用户标了也不生效（用户实报）。
+                // 仍不受「时间断层」影响：挂断留痕可能和上一条消息隔得很远，按时间
+                // 提前截断会漏掉真正终点，也会把聊天室消息圈进通话区间（用户实报）。
                 let endIdx = -1;
                 let duration = "";
+                let hookEndIdx = -1;      // 挂断留痕位置（手动标记不存在时启用）
+                let hookDuration = "";
                 for (let j = i + 1; j < allStored.length; j++) {
-                    if (uiRole(allStored[j]) !== "system") continue;
-                    const c = allStored[j].content;
-                    // Another call start → separate call, stop
-                    if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
-                    // Call end: 挂断/拒绝/取消（兼容"群语音通话"/"群视频通话"）
-                    if (c.includes(`挂断了${kw}`) || c.includes(`挂断了群${kw}`) || c.includes(`拒绝了${kw}`) || c.includes(`拒绝了群${kw}`) || c.includes(`取消了${kw}`) || c.includes(`取消了群${kw}`)) {
-                        endIdx = j;
-                        const match = c.match(/时长\s*(\d+:\d+)/);
-                        // 时长有两个来源，正文正则优先、mediaData 兜底。
-                        //
-                        // 单聊挂断消息的正文只有「[我挂断了语音通话]」，时长实际存在
-                        // mediaData.callDuration 里（通话屏落库时写入）——过去只扫正文，
-                        // 于是单聊时长永远取不到（用户实报「没有显示时长」）。
-                        // 群聊挂断把时长写进了正文，正则仍能命中。
-                        const fromMedia = allStored[j].mediaData?.callDuration;
-                        duration = match ? match[1] : (typeof fromMedia === "string" ? fromMedia : "");
-                        break;
-                    }
-                }
-
-                // ── 第二阶段：只有「用户手动标记的通话结尾」这一种兜底 ──
-                //
-                // 通话被意外中断（App 被杀、崩溃、强杀）时不会写挂断留痕，
-                // endIdx 停在 -1。此时**不再按时间猜**通话何时结束：实测
-                // 「一边通话一边在聊天室发消息」会把聊天室那些消息也圈进通话
-                // 区间、被当成通话内容（用户实报）。结束时刻只认明确来源——
-                // 上面的挂断留痕，或用户亲手标记的结尾。两者都没有就整段不折叠，
-                // 等用户标记后再折。
-                let interrupted = endIdx === -1;
-
-                // 用户手动标记的「通话结尾」（消息右键菜单「设为通话结尾」）。
-                // 扫描遇下一条「发起」即止，避免把后来的通话也吸进来。
-                if (interrupted) {
-                    for (let j = i + 1; j < allStored.length; j++) {
-                        const candidate = allStored[j];
-                        if (uiRole(candidate) === "system") {
-                            const c = candidate.content;
-                            if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
+                    const candidate = allStored[j];
+                    if (uiRole(candidate) === "system") {
+                        const c = candidate.content;
+                        // Another call start → separate call, stop
+                        if (c.includes("发起了语音通话") || c.includes("发起了视频通话")) break;
+                        // Call end: 挂断/拒绝/取消（兼容"群语音通话"/"群视频通话"）
+                        if (hookEndIdx === -1
+                            && (c.includes(`挂断了${kw}`) || c.includes(`挂断了群${kw}`)
+                                || c.includes(`拒绝了${kw}`) || c.includes(`拒绝了群${kw}`)
+                                || c.includes(`取消了${kw}`) || c.includes(`取消了群${kw}`))) {
+                            hookEndIdx = j;
+                            const match = c.match(/时长\s*(\d+:\d+)/);
+                            // 时长有两个来源，正文正则优先、mediaData 兜底。
+                            //
+                            // 单聊挂断消息的正文只有「[我挂断了语音通话]」，时长实际存在
+                            // mediaData.callDuration 里（通话屏落库时写入）——过去只扫正文，
+                            // 于是单聊时长永远取不到（用户实报「没有显示时长」）。
+                            // 群聊挂断把时长写进了正文，正则仍能命中。
+                            const fromMedia = candidate.mediaData?.callDuration;
+                            hookDuration = match ? match[1] : (typeof fromMedia === "string" ? fromMedia : "");
                         }
-                        if (candidate.mediaData?.callEndMarker) { endIdx = j; break; }
                     }
-                    interrupted = endIdx === -1;
+                    // 手动标记的结尾：直接采用，不再继续往后扫。
+                    if (candidate.mediaData?.callEndMarker) { endIdx = j; break; }
                 }
+
+                if (endIdx === -1 && hookEndIdx !== -1) {
+                    endIdx = hookEndIdx;
+                    duration = hookDuration;
+                } else if (endIdx !== -1) {
+                    // 用手动标记收尾时，时长仍取区间内那条挂断留痕写下的值。
+                    duration = hookDuration;
+                }
+                const interrupted = endIdx === -1;
+
+                // 时间断层兜底已移除：通话边界只认上面这两个明确来源，
+                // 两者都没有时 endIdx 仍为 -1，下面不会折叠任何东西。
 
                 // 时间断层兜底已移除。
                 //
@@ -5507,31 +5546,26 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 // 两者都没有时 endIdx 仍为 -1，下面不会折叠任何东西。
 
                 if (endIdx > i) {
-                    // 只收「通话产生的消息」：
-                    //   · origin === "call" —— 通话屏里的对话轮、用户从通话界面发的
-                    //   · isCallSysMsg      —— 通话留痕（发起了/挂断了）本身
+                    // 只收「通话产生的消息」，判定逐条进行：
+                    //   · origin === "call"  —— 通话屏里的对话轮、用户从通话界面发的
+                    //   · origin 不存在        —— 老版本记录（origin 是后加字段，那时不写）
+                    //   · isCallSysMsg        —— 通话留痕（发起了/挂断了）本身
+                    // 其余来源（origin 为 chat / custom_app / reading_discuss 等）
+                    // 一律留在时间流，不折进通话里。
                     //
-                    // 通话期间在聊天室发的消息与卡片（origin 为 chat）不收，
-                    // 留在时间流里正常显示。此前折叠按时间区间无差别全收，
-                    // 于是这些消息也被藏进折叠条（用户实报）。
-                    // 老记录退回「宽松」判定（用户选定）。
-                    //
-                    // origin 是后加的字段：更新之前的通话消息没有来源标记，和新版
-                    // 聊天室消息在数据上无法区分。整段都没有标记时（纯旧记录）按时间
-                    // 区间收全部对话，让老通话也能折起来、有正确计数——代价是那段
-                    // 时期在聊天室发的消息也会被一并收起（旧记录无法两全，已知取舍）。
-                    //
-                    // 只要区间里出现任一条带标记的消息，就说明这段通话发生在新版本，
-                    // 严格只收 origin === "call"：聊天室消息一律留在时间流。
-                    const rangeHasOrigin = allStored
-                        .slice(i, endIdx + 1)
-                        .some(m => m.origin !== undefined);
+                    // 为什么必须逐条、不能整段判：origin 是后加的字段，一通老通话里
+                    // 几十条消息全是无标记的。原先只要区间里出现「任意一条」带标记的
+                    // 消息就整段切严格模式，于是这些老消息被连坐排除——整通电话折成
+                    // 「共0条」，内容全露在外面（用户实报）。逐条判定后，老消息照收，
+                    // 同区间里的新版聊天室消息仍被排除，两头都不误伤。
                     const memberIds = new Set<string>();
                     let chatCount = 0;
                     for (let k = i; k <= endIdx; k += 1) {
                         const stored = allStored[k];
-                        const isCallMember = stored.origin === "call"
-                            || (!rangeHasOrigin && uiRole(stored) !== "system");
+                        const isLegacyOrCall = stored.origin === "call"
+                            || stored.origin === undefined
+                            || stored.origin === null;
+                        const isCallMember = isLegacyOrCall;
                         if (!isCallMember && !isCallSysMsg(stored)) continue;
                         memberIds.add(stored.id);
                         if (uiRole(stored) !== "system") chatCount += 1;

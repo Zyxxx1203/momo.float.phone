@@ -19,6 +19,23 @@ import {
     saveCallAutoChatConfig,
 } from "@/lib/call-auto-chat";
 
+/** 诊断日志前缀：控制台里按它过滤，一眼看全自动搭话的心跳 */
+const LOG_PREFIX = "[自动搭话]";
+
+/**
+ * 心跳诊断日志：排查「角色不主动开口」时看这里——每秒一条，带通话状态 /
+ * 剩余等待秒数 / 空转次数 / 本轮已说条数，以及这一秒没触发的具体原因。
+ * 想静音：控制台执行 window.__callAutoChatDebug = false（刷新页面后恢复默认开启）。
+ */
+function debugLog(message: string) {
+    if (typeof window !== "undefined"
+        && (window as unknown as { __callAutoChatDebug?: boolean }).__callAutoChatDebug === false) {
+        return;
+    }
+    // 用 log 而不是 debug：安卓壳远调 / 手机浏览器默认不展开 Verbose 级别
+    console.log(`${LOG_PREFIX} ${message}`);
+}
+
 type UseCallAutoChatParams = {
     /** 通话是否进行中（CONNECTING / ENDED 之外）。结束后停表 */
     active: boolean;
@@ -58,6 +75,17 @@ export function useCallAutoChat({
     const turnsRef = useRef(0);
     // 角色连着几轮没说出内容：等待时长按此翻倍，避免空转连发
     const emptyTurnsRef = useRef(0);
+    // 重复原因的日志节流：角色连说十几秒时，「有人在说」不必每秒打一条
+    const lastReasonRef = useRef<{ key: string; at: number }>({ key: "", at: 0 });
+
+    /** 同一原因 5 秒内只留一条日志（正常倒计时不受影响，仍逐秒打） */
+    const logReason = (key: string, message: string) => {
+        const now = Date.now();
+        const last = lastReasonRef.current;
+        if (last.key === key && now - last.at < 5000) return;
+        lastReasonRef.current = { key, at: now };
+        debugLog(message);
+    };
 
     /**
      * 安排下一次开口。
@@ -79,6 +107,7 @@ export function useCallAutoChat({
         turnsRef.current = 0;
         emptyTurnsRef.current = 0;
         deadlineRef.current = 0;
+        debugLog("你开口了：本轮计数与空转清零，等待重排");
     }, []);
 
     /**
@@ -88,6 +117,10 @@ export function useCallAutoChat({
     const notifyAssistantSpoke = useCallback((produced: boolean) => {
         emptyTurnsRef.current = produced ? 0 : emptyTurnsRef.current + 1;
         schedule();
+        const next = deadlineRef.current
+            ? `，下次等待 ${((deadlineRef.current - Date.now()) / 1000).toFixed(1)}s`
+            : "（未排期：开关关闭或通话已结束）";
+        debugLog(`角色说完一轮（${produced ? "有内容" : "空转"}）${next} 空转=${emptyTurnsRef.current}`);
     }, [schedule]);
 
     /** 改设置并即时生效（存盘 + 广播给其它页面），顺带把节拍复位 */
@@ -110,6 +143,12 @@ export function useCallAutoChat({
             deadlineRef.current = next.enabled
                 ? Date.now() + randomAutoChatDelaySeconds(next) * 1000
                 : 0;
+            debugLog(
+                next.enabled
+                    ? `设置变更：间隔 ${next.minSeconds}~${next.maxSeconds}s`
+                      + `，上限 ${next.maxTurns > 0 ? `${next.maxTurns} 条` : "不限"}，已重排`
+                    : "设置变更：自动搭话已关闭",
+            );
         }
         return next;
     }, []);
@@ -119,26 +158,53 @@ export function useCallAutoChat({
     useEffect(() => {
         if (!active) {
             deadlineRef.current = 0;
+            debugLog("通话不在进行中，心跳停表");
             return;
         }
         if (!config.enabled) {
             deadlineRef.current = 0;
+            debugLog("自动搭话已关闭，心跳停表");
             return;
         }
         // 刚开启（或刚进通话）：从当下起算一个随机间隔
         if (!deadlineRef.current) {
-            deadlineRef.current = Date.now() + randomAutoChatDelaySeconds(config) * 1000;
+            const firstDelay = randomAutoChatDelaySeconds(config);
+            deadlineRef.current = Date.now() + firstDelay * 1000;
+            debugLog(
+                `心跳启动：首次等待 ${firstDelay.toFixed(1)}s`
+                + `（间隔 ${config.minSeconds}~${config.maxSeconds}s，`
+                + `上限 ${config.maxTurns > 0 ? `${config.maxTurns} 条` : "不限"}）`,
+            );
         }
         const timer = window.setInterval(() => {
-            if (callStateRef.current !== "IDLE") return;
             const current = configRef.current;
             if (!current.enabled) return;
             const limit = current.maxTurns;
-            if (limit > 0 && turnsRef.current >= limit) return;
+            const turns = limit > 0 ? `${turnsRef.current}/${limit}` : `${turnsRef.current}/不限`;
+            const state = callStateRef.current;
             const deadline = deadlineRef.current;
-            if (!deadline || Date.now() < deadline) return;
+            // 「剩余」在走 = 心跳还活着；整段时间一条日志都没有 = 定时器被系统冻结
+            // （切回前台会补上）；显示「待重排」= 刚触发过或用户刚开口
+            const remain = deadline
+                ? `${Math.max(0, (deadline - Date.now()) / 1000).toFixed(1)}s`
+                : "待重排";
+            // 不触发的每一档原因都写出来——只看「没反应」是猜不出卡在哪的
+            const head = `状态=${state} 剩余=${remain} 空转=${emptyTurnsRef.current} 本轮=${turns}`;
+            if (state !== "IDLE") {
+                logReason(`state:${state}`, `${head} → 有人在说，本轮不触发`);
+                return;
+            }
+            if (limit > 0 && turnsRef.current >= limit) {
+                logReason("limit", `${head} → 已达本次通话上限，等你开口才重新计数`);
+                return;
+            }
+            if (!deadline || Date.now() < deadline) {
+                debugLog(`${head} → 等待中`);
+                return;
+            }
             turnsRef.current += 1;
             deadlineRef.current = 0;
+            debugLog(`${head} → 触发自动搭话（第 ${turnsRef.current} 条）`);
             beforeTriggerRef.current?.();
             onTriggeredRef.current?.();
             runTurnRef.current();

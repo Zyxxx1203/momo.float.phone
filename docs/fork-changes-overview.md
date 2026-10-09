@@ -16,6 +16,10 @@
 
 上一版 D / E / F 三节全是【推断】。这一版把能读的都读了，标记随之上调或保持诚实。
 
+**2026-10-09 增量**：本次补入 C12–C16、B6–B8 与新铁律（通话折叠判定、语音留档、
+离线推送修复、PWA 缓存），对应提交 4f3ba14 → 6d3b2a8。基线由「领先 149」
+更新为「约 159」——**这个数受对比接口缓存影响，不必较真，要看实际差异用「对比官方版本」现查。**
+
 ---
 
 ## 一、基线现状
@@ -23,7 +27,7 @@
 | 项目 | 数值 |
 | --- | --- |
 | 分支 | `main` |
-| 相对官方 | 领先 **149** 个提交，落后 **3** 个提交 |
+| 相对官方 | 领先 **约 159** 个提交，落后 **3** 个提交 |
 | 可贡献文件（官方白名单内） | 114 个 |
 | 白名单外改动 | 22 个（`android-shell/` 整块 + 少量配置） |
 | 壳版本 | `versionCode 8` / `versionName "1.0.9"` |
@@ -95,6 +99,31 @@
 
 - **文件**：`lib/idle-reconnect-storage.ts`
 - **做了什么**：`IDLE_RECONNECT_MAX_CONSECUTIVE = 3`，连续重连失败三次就停手，避免无限重连把设备和电量拖垮。
+
+#### B6. 通话期间不挂 / 撤销离线预约 【实证】
+
+- **文件**：`lib/push-bailout-client.ts`、三个通话屏
+- **做了什么**：两半一起做——
+  1. **挂载时撤销**：通话开始调 `suspendBailoutsForCall(sessionId)`，撤销该会话已挂的三类键
+     （`followup:<sessionId>:` 追问兜底、`reply:<sessionId>` 回复兜底、`idle:<ruleId>:` 冷场重连）；
+  2. **arm 时门控**：追问兜底、冷场重连在挂单前判 `isCallActiveForSession(sessionId)`，通话中不挂。
+- **症状（修的就是它）**：明明在通话，却按沉默判定生成了一条主动消息，**只在系统通知里冒出来**，
+  聊天室里没有对应记录。
+- **设计取舍**：通话结束**不主动重挂**，靠下次用户消息或巡检自然重排。
+  理由：通话何时结束不好判（挂断/崩溃/强杀都可能），主动补挂反而容易出错。
+
+#### B7. 离线推送：点击直达会话 + 文案与聊天一致 【实证】
+
+- **文件**：`lib/shell-notify.ts`、相关推送组装点
+- **做了什么**：通知里的文案与聊天室实际内容统一；点通知能直接跳到对应会话。
+- **配套**：`sessionId` 走的是「多加的第 4 个参数」，旧壳忽略多余参数不会炸（见 A4）。
+
+#### B8. 离线推送：壳通知使用角色头像（大图标） 【实证】
+
+- **文件**：`lib/shell-notify.ts`、`android-shell/.../MainActivity.kt`
+- **做了什么**：原生通知的大图标改用角色头像，一眼能看出是谁来的消息。
+- **注意体积门控**：头像以 data URL 传，快照有上限，超限就**只发通知不发头像**
+  （`NOTIFY_AVATAR_MAX_CHARS = 120000`）——不门控会整条消息 413 拒收，丢的是整条离线消息（见 A4）。
 
 #### B5. 离线来电能力注入 【实证】
 
@@ -177,6 +206,73 @@
 
 - **症状**：Android 12 及以上，App 在后台时 `startForegroundService` 抛 `ForegroundServiceStartNotAllowedException`，浮窗起不来。
 - **处置**：把这条例外如实记进 `lastError`（见 C7），不要吞掉。真正要后台起服务需要 `SYSTEM_ALERT_WINDOW` 等条件配合，属于系统限制，不是代码 bug。
+
+#### C12. 通话消息折叠（判定规则） 【实证 · 关键】
+
+- **文件**：`components/chat/chat-room.tsx`（`voiceCallGroups` 一段，约 200 行）、`components/chat/voice-call-screen.tsx` 等三屏
+- **做了什么**：把一通话的消息收成折叠条（「语音通话 · 全程 12:03 · 共 23 条」）。
+  判定规则是这一块的全部难点，**错了就是用户实报的 bug**：
+  - **来源逐条判，不整段判**：`origin === "call"` 或 `origin` 不存在（老记录）都收；
+    只有明确是其它来源（chat/custom_app/reading_discuss…）才排除。
+  - **起点**：系统留痕「发起了语音/视频通话」，或手动标记 `mediaData.callStartMarker`（右键菜单新增）。
+  - **终点**：**手动标记 `callEndMarker` 优先**，挂断/拒绝/取消留痕只作候选。
+  - **绝不按时间断层猜**：结束时刻只认上面两个明确来源，都没有就整段不折。
+  - **全量预计算**：直接翻整个会话算区间，再映射回当前加载窗口（默认只加载最近 50 条，
+    长通话的起点留痕早被挤出窗口）。
+  - **分段补偿**：通话被聊天室消息切断会分成多段，每段都显示全程时长与总条数 + 「第 X/Y 段」；
+    「无结束记录」只标最后一段。
+- **两个实报 bug（都修了，记录备查）**：
+  1. **聊天室消息被吞**：早期按时间区间无差别全收，通话期间在聊天室发的消息也被折进去。
+  2. **老通话折成「共 0 条」**：`origin` 是后加字段，老消息没有它。**整段判定**下，
+     区间里出现任意一条带标记的新消息就整段切严格模式，于是几十条老对话被连坐排除。
+     **改成逐条判定后解决。**
+- **顺带修的一个语义坑**：手动标记原先只当「挂断留痕不存在时的兜底」，
+  于是用户标了也不生效（实报：标了结尾，折叠仍按那条挂了一夜的挂断记录折，时长 11:52）。
+  **改为手动优先。**
+
+#### C13. 通话语音留档（复听原音） 【实证 · 关键】
+
+- **文件**：`lib/call-audio-storage.ts`（新增）、三个通话屏、`lib/chat-storage.ts`
+- **做了什么**：TTS 合成后把音频落进媒体库（`storeMediaBlob`），返回 `media-store://` 引用，
+  写进对应消息的 `mediaData.callAudioRef`。链路：
+  - `serializeChatMessage` 整包透传 `mediaData` → **自定义 APP 从 `chat.readHistory` 直接能读到引用**；
+  - 宿主代播 `voice.play` **已支持 `media-store://` 引用**（内部 `loadMediaBlob` 转 objectURL），
+    且不校验引用归属 → APP 拿到引用就能放原音，**无需改宿主 API**。
+- **修的问题**：原先音频只活在通话屏内存 Map 里（上限 20 段），挂断即失；
+  「复听」只能重新合成——音色语气每次不同，还重复烧额度。
+- **保留策略**：轻量索引 `ai_phone_call_audio_index_v1` 记 `{ref, createdAt}`，
+  默认**保留 30 天 / 400 段**，超出从最旧清（连带 `deleteMediaRef`）。
+- **善后**：编辑 / 删除 / 重新生成字幕时同步清留档并摘掉 `callAudioRef`——不然点开听到的是另一句话。
+- **老记录降级**：无留档就回退重新合成，但 UI 要**说清这条是原音还是重合成**。
+- **落库细节**：`updateChatMessage` 是**顶层浅合并**，改 `mediaData` 必须自己 `{...原值, 新字段}` 拼全，
+  否则会把这个消息上原有的通话时长等字段抹掉。
+
+#### C14. 三通话屏能力对齐（视频/群聊补字幕操作） 【实证】
+
+- **文件**：`components/chat/video-call-screen.tsx`、`group-call-screen.tsx`、`call-subtitle-item.tsx`
+- **做了什么**：视频通话补上**重听 / 编辑 / 删除 / 重新生成**（原先只有语音屏有）；
+  三项都落到真实聊天记录（字幕带 `messageIds`），并作废该句音频缓存。
+- **顺带修的**：视频屏 import 了 `useCallReplyQueue` 却从未调用，`replyQueue` 未定义，
+  只要渲染到引用它的分支（缩成小窗、挂安卓壳浮窗）就抛 `ReferenceError` → **整个通话页白屏**。
+- **群聊特别**：字幕结构里有多发言人，**`senderName` 必须保留**，不能照抄单聊的处理。
+
+#### C15. 通话屏落库后广播消息更新 【实证】
+
+- **文件**：三个通话屏
+- **做了什么**：通话中落库的消息立即广播 `chat-messages-updated`。
+- **为什么**：通话屏在聊天室之外（由 `CallLayer` 渲染），不广播的话消息要等挂断才出现在聊天室里，
+  折叠条也一直不更新（实报：要挂掉才同步）。
+
+#### C16. 缓存版本与服务端缓存头 【实证】
+
+- **文件**：`public/sw.js`、`netlify.toml`
+- **做了什么**：`CACHE_VERSION` `v12 → v13`（activate 时整批清旧缓存）；
+  给 `/sw.js` 加 `Cache-Control: no-cache, no-store, must-revalidate`。
+- **为什么两条都要**：只升版本号不够——浏览器里缓存的旧 `sw.js` 还在用旧逻辑；
+  只加 no-cache 也不够——已注册的旧 SW 照样发缓存。
+- **诊断法（最实用的一条）**：找一个**代码里改过的文案**去对，对不上就是旧包。
+  真实案例：折叠条代码是「共3条」，用户看到「3条消息」→ 文案不符 → 锁定旧包，
+  一步定位，比翻日志快得多。
 
 #### C11. 权限三类区别 【实证】
 
@@ -336,8 +432,9 @@
 | 文件 | 本 fork 改动量 | 为什么高风险 |
 | --- | --- | --- |
 | `components/story/story-app-base.tsx` | +1210/-150 | 全 fork 最大单片改动，剧情是官方也在迭代的模块；冲突面最大 |
-| `components/chat/chat-room.tsx` | +288/-106 | 聊天主界面，双方都会动 |
-| `lib/chat-storage.ts` | +388/-16 | 数据层，改动会牵动所有聊天功能 |
+| `components/chat/chat-room.tsx` | 约 +290/-106 | 聊天主界面，双方都会动；**通话折叠一整块（约 200 行）也在这里**，是最容易打起来的地方 |
+| `lib/chat-storage.ts` | 约 +390/-16 | 数据层，改动会牵动所有聊天功能；本轮又加了 `callAudioRef` / `callStartMarker` 两个 mediaData 字段 |
+| `components/chat/voice-call-screen.tsx` / `video-call-screen.tsx` / `group-call-screen.tsx` | 各数百行 | 通话屏本身官方也在迭代；本轮三屏都动了（落库、字幕操作、推送撤销），冲突面变大 |
 | `components/settings/image-generation-settings.tsx` | +387/-84 | 设置页大改，官方也在动生图 |
 | `components/chat/chat-settings-panel.tsx` | +409/-19 | 同上 |
 | `lib/checkphone-engine.ts` | +209/-4 | 查手机玩法 |
@@ -348,7 +445,7 @@
 
 新增文件在同步时基本不会冲突，因为官方没有同名文件。这批包括：
 
-- 通话：`lib/call-session-store.ts`、`lib/call-overlay-theme.ts`、`lib/call-auto-chat.ts`、`lib/shell-call-overlay.ts`、`lib/chat-avatar-intent.ts`、`components/chat/call-layer.tsx`、`call-mini-window.tsx`、`use-shell-call-overlay.ts`、`use-call-reply-queue.ts`、`use-call-auto-chat.ts`、`call-auto-chat-control.tsx`、`components/settings/call-overlay-settings.tsx`
+- 通话：`lib/call-session-store.ts`、`lib/call-overlay-theme.ts`、`lib/call-auto-chat.ts`、`lib/shell-call-overlay.ts`、`lib/chat-avatar-intent.ts`、`lib/call-audio-storage.ts`、`components/chat/call-layer.tsx`、`call-mini-window.tsx`、`use-shell-call-overlay.ts`、`use-call-reply-queue.ts`、`use-call-auto-chat.ts`、`call-auto-chat-control.tsx`、`call-subtitle-item.tsx`、`components/settings/call-overlay-settings.tsx`
 - 推送：`lib/bailout-dirty.ts`、`lib/bailout-cancel.ts`、`lib/push-bailout-diagnostics.ts`、`lib/push-selfcheck.ts`、`components/shell-push-registrar.tsx`
 - 故事：`components/story/story-pagination-manager.tsx`、`story-settings-page.tsx`、`story-scroll-fix.tsx`
 - 音效：`lib/chat-sound.ts`、`components/chat/chat-sound-editor.tsx`、`session-chat-sounds.tsx`
@@ -403,15 +500,34 @@
 19. **读不到真实存储时必须失败，绝不退回内存缓存。** 否则产出「看起来成功」的残缺备份。（F1）
 20. **空值要兜。** 旧数据可能缺字段，排序里一个 `|| ""` 就能避免整个页面崩。（D3）
 
+### 通话记录（本轮新增）
+
+25. **边界判定要逐条，不要整段。** 一条新数据能让「整段判定」把几十条老数据连坐——
+    实报就是老通话折成「共 0 条」。（C12）
+26. **人工标记优先于自动留痕。** 用户亲手标的是明确意图，自动写的那条可能是误留的
+    （挂了一夜忘了挂）。当「兜底」用就是标了也不生效。（C12）
+27. **合成出来的东西要落库，别只放内存。** 内存缓存挂断即失，「事后想再听」就只能重算——
+    既不一致又重复烧额度。（C13）
+28. **改 `mediaData` 要自己拼全。** `updateChatMessage` 是顶层浅合并，直接传 `{newField}`
+    会把这条消息上原有的字段（通话时长等）抹掉。（C13）
+29. **删/改内容时要连带清掉它的派生物。** 文字改了，原音就对不上了——留着点开是另一句话。（C13）
+
+### 发版与缓存（本轮新增）
+
+30. **升级 SW 要两条一起做**：升 `CACHE_VERSION` + 给 `sw.js` 加 no-cache。
+    只做一条，旧包照样在用户机器上跑。（C16）
+31. **判断用户跑的是不是旧包，先对文案。** 找一处代码里改过的文案去对，
+    对不上就是旧包——比翻任何日志都快。（C16）
+
 ### 数据安全约定
 
-21. **不向官方贡献 PR**（用户已明确）。改动只留在 fork。
-22. **壳侧永不在白名单内**，想复用只能照移植说明书手改。
+32. **不向官方贡献 PR**（用户已明确）。改动只留在 fork。
+33. **壳侧永不在白名单内**，想复用只能照移植说明书手改。
 
-### 工作流（本次新增，血泪）
+### 工作流（血泪）
 
-23. **一次只提交一份文档，确认落地再提下一份。**（见第五节事故记录）
-24. **提交前先看远端 main 在哪。** 基点落后就会 `not a fast forward`（422）。
+34. **一次只提交一份文档，确认落地再提下一份。**（见第五节事故记录）
+35. **提交前先看远端 main 在哪。** 基点落后就会 `not a fast forward`（422）。
 
 ---
 
@@ -440,6 +556,11 @@
 | 浮窗外观/配色/诊断 | `components/settings/call-overlay-settings.tsx`、`lib/call-overlay-theme.ts` |
 | 浮窗起不来 | 先看设置页「诊断」六项 + `lastError`，再看 `CallOverlayService.kt` |
 | 通话自动搭话 | `lib/call-auto-chat.ts`、`components/chat/use-call-auto-chat.ts` |
+| 通话折叠折错（吞聊天室消息／共0条） | `components/chat/chat-room.tsx` 的 `voiceCallGroups`（判定规则见 C12） |
+| 通话复听只能重新合成 | `lib/call-audio-storage.ts` + 三通话屏的落库点（C13） |
+| 通话字幕重听/编辑/删除 | `components/chat/call-subtitle-item.tsx` + 三通话屏（C14） |
+| 修复上线了但用户行为照旧 | `public/sw.js` 的 `CACHE_VERSION` + `netlify.toml`（C16） |
+| 通话中弹出主动消息通知 | `lib/push-bailout-client.ts`（B6） |
 | 离线推送不住 | `lib/push-selfcheck.ts`、`lib/push-bailout-diagnostics.ts`、`PushService.kt` |
 | 排期删不掉 | `lib/bailout-cancel.ts` |
 | 通知点击不跳会话 | `lib/shell-notify.ts`（第 4 参数 sessionId） |

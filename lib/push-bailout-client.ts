@@ -745,6 +745,17 @@ export function installScheduledBailoutRefresher(): void {
         if (detail.key) cancelBailoutKey(detail.key);
         if (detail.prefix) void cancelBailoutPrefix(detail.prefix);
     });
+    // 通话结束：把通话开始时撤销掉的离线预约重新挂上。
+    //
+    // suspendBailoutsForCall 会撤销该会话的追问兜底与冷场重连，但撤销之后
+    // 原先没有任何时机会重挂它们——refreshScheduledBailouts 要等 10 分钟巡检，
+    // 而用户常在通话后不久就退出 App，那笔预约就一直是空的。
+    // 表现：打过一次电话之后，角色再也不主动搭话（用户实报）。
+    //
+    // 只在正常挂断时触发：endCall() 先清 activeCall 再派发本事件，所以 arm*
+    // 里的 isCallActiveForSession 门控会自然放行。崩溃/强杀不派发此事件，
+    // 那种情况仍由下面的巡检兜底。
+    window.addEventListener("chat-call-ended", () => { void refreshScheduledBailouts(); });
     window.setTimeout(() => { void refreshScheduledBailouts(); }, 3_000);
     // arm* 内部按 triggerKey 幂等覆盖，重复巡检只是覆盖同一行，代价极低。
     bgSetInterval(() => { void refreshScheduledBailouts(); }, 10 * 60_000);

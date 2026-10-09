@@ -223,7 +223,7 @@ class PushService : Service() {
                         }.isSuccess
                         if (shown) return
                     }
-                    showMessageNotification(title, text2)
+                    showMessageNotification(title, text2, body.optString("sessionId"))
                 }
             }
 
@@ -272,11 +272,25 @@ class PushService : Service() {
         )
     }
 
-    private fun contentIntent(): PendingIntent = PendingIntent.getActivity(
-        this, 0,
-        Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        PendingIntent.FLAG_IMMUTABLE,
-    )
+    /**
+     * 点通知的落点：带 sessionId 时经深链直达对应会话，否则回首页。
+     * 深链与 MainActivity 共用 EXTRA_OPEN_URL 通道。
+     */
+    private fun contentIntent(sessionId: String? = null): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val id = sessionId?.trim().orEmpty()
+        if (id.isNotEmpty()) {
+            intent.putExtra(
+                MainActivity.EXTRA_OPEN_URL,
+                "${MainActivity.SITE_URL.trimEnd('/')}/#open-chat=${android.net.Uri.encode(id)}",
+            )
+        }
+        return PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
 
     private fun buildKeepAliveNotification(text: String): Notification =
         NotificationCompat.Builder(this, CH_KEEPALIVE)
@@ -351,14 +365,14 @@ class PushService : Service() {
         getSystemService(NotificationManager::class.java).notify(CallAlert.NOTIF_MISSED_ID, notification)
     }
 
-    private fun showMessageNotification(title: String, body: String) {
+    private fun showMessageNotification(title: String, body: String, sessionId: String? = null) {
         val notification = NotificationCompat.Builder(this, CH_MESSAGES)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setAutoCancel(true)
-            .setContentIntent(contentIntent())
+            .setContentIntent(contentIntent(sessionId))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         getSystemService(NotificationManager::class.java).notify(notifId++, notification)

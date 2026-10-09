@@ -406,12 +406,25 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) hideSystemStatusBar()
     }
 
-    /** 点通知回到 App 首页（不指定具体会话，冷启动打进主界面即可）。 */
-    private fun contentIntent(): PendingIntent = PendingIntent.getActivity(
-        this, 0,
-        Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        PendingIntent.FLAG_IMMUTABLE,
-    )
+    /**
+     * 点通知的落点。带 sessionId 时通过深链直达对应会话（复用 consumeOpenUrl 的
+     * EXTRA_OPEN_URL 通道，来电接听走的就是它）；不带则回首页。
+     *
+     * 用 hash（#open_session=）而不是 query：SPA 已在运行时 loadUrl 到同页 hash
+     * 只触发 hashchange，不会整页重载；query 变化会触发一次完整重新加载。
+     */
+    private fun contentIntent(sessionId: String? = null): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val id = sessionId?.trim().orEmpty()
+        if (id.isNotEmpty()) {
+            intent.putExtra(EXTRA_OPEN_URL, "${SITE_URL.trimEnd('/')}/#open-chat=${Uri.encode(id)}")
+        }
+        return PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
 
     private fun ensurePushService() {
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -471,7 +484,7 @@ class MainActivity : AppCompatActivity() {
          * @return 是否已发出（JS 端据此决定要不要退回浏览器通知路径）。
          */
         @JavascriptInterface
-        fun notify(title: String, body: String, avatarUrl: String): Boolean = runCatching {
+        fun notify(title: String, body: String, avatarUrl: String, sessionId: String?): Boolean = runCatching {
             ensureMessageChannel()
             val manager = getSystemService(NotificationManager::class.java)
             val icon = loadAvatarBitmap(avatarUrl)
@@ -481,7 +494,7 @@ class MainActivity : AppCompatActivity() {
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                 .setAutoCancel(true)
-                .setContentIntent(contentIntent())
+                .setContentIntent(contentIntent(sessionId))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
             if (icon != null) builder.setLargeIcon(icon)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {

@@ -141,6 +141,10 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
     const [organizations, setOrganizations] = useState<OrganizationOption[]>([]);
     const [selectedOrganizationSlug, setSelectedOrganizationSlug] = useState("");
     const [selectedRef, setSelectedRef] = useState("");
+    // 本机当前已连接、但不是「本应用创建」的项目 ref：弹窗里据此提供显式的原地更新入口
+    const [existingRef, setExistingRef] = useState("");
+    // 用户是否主动选择了「更新这个非本应用创建的既有项目」（决定是否显示红字警示）
+    const [updateOverride, setUpdateOverride] = useState(false);
     const [scopeBackup, setScopeBackup] = useState(true);
     const [scopeWeixin, setScopeWeixin] = useState(true);
     const [scopePush, setScopePush] = useState(true);
@@ -184,11 +188,17 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
             const managedRef = config.managedProjectRef === configuredRef ? configuredRef : "";
             if (managedRef) {
                 // 本应用创建过的专用项目允许原地重新部署；旧版手填/误选项目没有标记，
-                // 一律走新建流程，绝不把这次发布写回已有业务库。
+                // 默认走新建流程，绝不把这次发布写回已有业务库。
                 setSelectedRef(managedRef);
+                setExistingRef("");
+                setUpdateOverride(false);
                 setOrganizations([]);
                 setSelectedOrganizationSlug(config.managedOrganizationSlug || "");
             } else {
+                // 没有标记但本机确实连着一个项目（多因换设备/清数据丢了标记）：
+                // 不在弹窗里自动选中它，只在用户明确点「更新这个项目」时才原地更新。
+                setExistingRef(configuredRef);
+                setUpdateOverride(false);
                 const data = await callSupabaseAdmin<{ organizations: OrganizationOption[] }>({ action: "organizations", token });
                 if (data.organizations.length === 0) {
                     throw new Error([
@@ -352,6 +362,20 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
             setBusy(null);
             refreshStatus();
         }
+    };
+
+    /**
+     * 显式改为「原地更新本机已连接的既有项目」。
+     *
+     * 只由用户在弹窗里主动点击触发：自动判定仍然只认本应用创建过的项目，
+     * 这条路径把「这是我自己要更新的项目」变成一次明确的用户动作，
+     * 服务端 assert_dedicated_project 独立项目校验照旧兜底。
+     */
+    const startUpdateExisting = () => {
+        if (busy || !existingRef) return;
+        setSelectedRef(existingRef);
+        setUpdateOverride(true);
+        setSelectedOrganizationSlug("");
     };
 
     const openConnectDialog = () => {
@@ -781,11 +805,34 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                                 <div className="menu-desc !mt-0 rounded-[14px] bg-black/[0.03] px-3 py-2.5">
                                     将新建独立的「AI Phone Personal Cloud」项目，不会写入任何已有项目。
                                 </div>
+                            ) : updateOverride ? (
+                                <div className="rounded-[14px] bg-amber-500/10 px-3 py-2.5 text-[calc(12px*var(--app-text-scale,1))] font-medium leading-relaxed text-amber-700">
+                                    ⚠️ 将把本次发布<strong>写入你当前已连接的既有项目</strong>
+                                    （{existingRef}.supabase.co）。此项目不是本应用创建的，部署会覆盖其中的
+                                    ai-phone-push / push-generate 等同名云函数。请确认这就是你要更新的项目。
+                                </div>
                             ) : (
                                 <div className="menu-desc !mt-0 rounded-[14px] bg-black/[0.03] px-3 py-2.5">
                                     将更新此前由 AI Phone 创建的专用项目。
                                 </div>
                             )}
+
+                            {!selectedRef && existingRef ? (
+                                <div className="flex flex-col gap-2 rounded-[14px] bg-black/[0.03] px-3 py-2.5">
+                                    <span className="menu-desc !mt-0">
+                                        本机当前连着一个项目（{existingRef}.supabase.co），但没有「本应用创建」标记
+                                        （换设备、清数据或旧版手填地址都会这样）。要更新它就选这里，否则将新建项目。
+                                    </span>
+                                    <button
+                                        type="button"
+                                        className="ui-btn ui-btn-outline self-start"
+                                        onClick={startUpdateExisting}
+                                        disabled={Boolean(busy)}
+                                    >
+                                        更新这个已有项目
+                                    </button>
+                                </div>
+                            ) : null}
                             {!selectedRef && (
                                 <label className="flex flex-col gap-1">
                                     <span className="menu-desc !mt-0">创建到哪个 Supabase 组织</span>
@@ -820,7 +867,7 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                             >
                                 {busy === "deploy"
                                     ? <><Loader2 size={15} className="animate-spin" /> {progress || "部署中…"}</>
-                                    : selectedRef ? "开始部署" : "创建并部署"}
+                                    : updateOverride ? "更新此项目" : selectedRef ? "开始部署" : "创建并部署"}
                             </button>
                         </div>
                     </div>

@@ -22,6 +22,7 @@ import { ToolboxSettings } from "./settings/toolbox-settings";
 import { ModerationCenter } from "./settings/moderation-center";
 import { AgentComputerSettings } from "./settings/agent-computer-settings";
 import { CallOverlaySettings } from "./settings/call-overlay-settings";
+import { PerceptionSettings } from "./perception/perception-settings";
 import { fetchIsAdmin } from "@/lib/moderation-client";
 import { PageShell } from "./ui/page-shell";
 import { CardGrid, FeaturedCard, type CardItem, type FeaturedCardItem } from "./ui/card-grid";
@@ -59,6 +60,7 @@ type SubPage =
     | "agentComputer"
     | "moderation"
     | "callOverlay"
+    | "perception"
     | "about";
 
 const SETTINGS_MENU = [
@@ -74,6 +76,7 @@ const SETTINGS_MENU = [
     { id: "weixin", icon: MessageSquare, label: "微信接入", desc: "iLink Bot", iconColor: CONTENT_APP_ACCENTS.chat , glass: "weixin" },
     { id: "toolbox", icon: Wrench, label: "聊天工具箱", desc: "外部工具调用", iconColor: BINDING_ACCENTS.voice , glass: "toolbox" },
     { id: "callOverlay", icon: PhoneCall, label: "通话浮窗外观", desc: "回复条配色", iconColor: BINDING_ACCENTS.voice , glass: "voice" },
+    { id: "perception", icon: Activity, label: "感知", desc: "让角色知道电量、网络与在用应用", iconColor: BINDING_ACCENTS.memory , glass: "" },
     { id: "agentComputer", icon: Laptop, label: "角色电脑", desc: "云端小电脑（自部署）", iconColor: BINDING_ACCENTS.memory , glass: "agent-computer" },
     { id: "identity", icon: UserCircle, label: "用户身份", desc: "个人信息", iconColor: BINDING_ACCENTS.identity , glass: "identity" },
     { id: "about", icon: Info, label: "关于与声明", desc: "版本与协议", iconColor: BINDING_ACCENTS.memory , glass: "about" },
@@ -325,6 +328,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                 return <ToolboxSettings />;
             case "callOverlay":
                 return <CallOverlaySettings onNotice={onNotice} />;
+            case "perception":
+                return <PerceptionSettings onNotice={onNotice} />;
             case "agentComputer":
                 return <AgentComputerSettings onNotice={onNotice} />;
             case "moderation":
@@ -426,7 +431,7 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                             </div>
                             <div className="mt-[10px]">
                                 <CardGrid
-                                    items={SETTINGS_MENU.filter(item => ["weixin", "toolbox", "callOverlay"].includes(item.id)).map(makeCardItem)}
+                                    items={SETTINGS_MENU.filter(item => ["weixin", "toolbox", "callOverlay", "perception"].includes(item.id)).map(makeCardItem)}
                                 />
                             </div>
                             <div className="mt-[10px]">

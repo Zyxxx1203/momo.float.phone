@@ -81,6 +81,9 @@ class MainActivity : AppCompatActivity() {
     /** 网页消息通知的自增 id：同一条消息覆盖同一 id 会让新通知顶掉旧的，故逐条递增。 */
     private var webNotifId = 500
 
+    /** 感知桥：把电量/网络/应用名交给网页（边界说明见 PerceptionBridge）。 */
+    private val perception by lazy { PerceptionBridge(this) }
+
     /** 拉取远程头像用；超时压短，头像拿不到就退回默认图标，不能拖住通知。 */
     private val avatarClient = OkHttpClient.Builder()
         .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
@@ -471,6 +474,22 @@ class MainActivity : AppCompatActivity() {
         /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
         @JavascriptInterface
         fun getStatusBarHeightPx(): Int = statusBarHeightCssPx
+
+        // ── 感知桥（电量 / 网络 / 应用名）────────────────
+        // 只读、零判断、不抛异常。所有「要不要上报」的逻辑在网页侧，
+        // 这样阈值与开关随网页部署即时生效，不必重编 APK。
+
+        /** 设备状态快照 JSON：{ battery:{percent,charging}, network:{type,metered} }。 */
+        @JavascriptInterface
+        fun getPerceptionSnapshot(): String = perception.snapshotJson()
+
+        /** 包名 → 应用显示名；取不到返回空串。 */
+        @JavascriptInterface
+        fun getAppLabel(packageName: String): String = perception.appLabel(packageName)
+
+        /** 本机支持哪些感知能力，给「感知 → 诊断」面板用。 */
+        @JavascriptInterface
+        fun getPerceptionCapabilities(): String = perception.capabilitiesJson()
 
         /**
          * 让网页直接发一条真正的系统通知（网页侧封装在 lib/shell-notify.ts）。

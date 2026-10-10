@@ -23,7 +23,7 @@ import {
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, SYSTEM_CALENDAR_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
 import {
     checkQueryCooldown,
     describeStatusByFocus,
@@ -34,6 +34,15 @@ import {
     markQueryPerformed,
 } from "./perception";
 import { notifyDeviceAction, runDeviceAction } from "./device-action";
+import {
+    formatEventTime,
+    hasCalendarBridge,
+    hasCalendarReadPermission,
+    hasCalendarWritePermission,
+    insertSystemCalendarEvent,
+    loadSystemCalendarConfig,
+    readSystemCalendarEvents,
+} from "./system-calendar";
 import { bridgeConnection, loadBridgeDataItems, loadBridgeShortcutActions, readAllBridgeStateSnapshots, readBridgeStateSnapshot } from "./reality-bridge/storage";
 import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
@@ -806,6 +815,8 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     // 「调了但行为不对」——极难排查。宁可让用户起名时就被拦住（见现实桥的保留名校验）。
     if (call.name === "查看TA的手机") return executePerceptionReadTool(call, context);
     if (call.name === "操作TA的设备") return executeDeviceActionTool(call, context);
+    if (call.name === "看看TA的日程") return executeSystemCalendarReadTool(call);
+    if (call.name === "记进TA的日历") return executeSystemCalendarWriteTool(call);
     if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
@@ -824,6 +835,169 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     }
 
     return executeMemoryWriteTool(call.args, capability, context);
+}
+
+/** 角色查看用户真实手机的系统日历（只读，且只读摘要字段）。 */
+async function executeSystemCalendarReadTool(call: ToolCall): Promise<ToolResult> {
+    const capability = getInternalCapability(SYSTEM_CALENDAR_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return {
+            name: call.name,
+            success: false,
+            error: "「TA的系统日历」能力未启用（工具箱 → 内置能力）",
+            continueConversation: false,
+            persistToHistory: false,
+            userNotice: "TA的系统日历能力未启用",
+        };
+    }
+    if (!hasCalendarBridge()) {
+        return { name: call.name, success: false, error: "当前 App 版本不支持读日历，需要更新安卓壳" };
+    }
+    // 两道都要过：用户在面板里打开的开关（意图）与系统授予的权限（能力）。
+    // 只查权限不够——用户可能授权后又在面板里关掉了，那就不该再读。
+    if (!loadSystemCalendarConfig().readEnabled) {
+        return {
+            name: call.name,
+            success: false,
+            error: "TA 还没有开启「读取日程」（设置 → 系统日历）",
+        };
+    }
+    if (!hasCalendarReadPermission()) {
+        return {
+            name: call.name,
+            success: false,
+            error: "还没有读取日历的权限，需要 TA 去设置里授权",
+        };
+    }
+
+    const daysAhead = Number(call.args?.daysAhead);
+    const daysBack = Number(call.args?.daysBack);
+    const events = readSystemCalendarEvents(
+        Number.isFinite(daysAhead) ? Math.max(1, Math.min(60, Math.round(daysAhead))) : 7,
+        Number.isFinite(daysBack) ? Math.max(0, Math.min(60, Math.round(daysBack))) : 0,
+    );
+    if (events.length === 0) {
+        // 空是正常结果，不是错误：说「没安排」比说「读取失败」准确
+        return { name: call.name, success: true, data: "这段时间 TA 的日历里没有安排。" };
+    }
+    const lines = events.map(event => {
+        const when = formatEventTime(event);
+        const place = event.location ? ` @ ${event.location}` : "";
+        return `- ${when} ${event.title}${place}`;
+    });
+    return {
+        name: call.name,
+        success: true,
+        data: `TA 的日程（共 ${events.length} 条）：\n${lines.join("\n")}`,
+        userNotice: "看了看你的日程",
+    };
+}
+
+/** 角色把一个重要日子写进用户系统日历。只新增，绝不改删用户已有安排。 */
+async function executeSystemCalendarWriteTool(call: ToolCall): Promise<ToolResult> {
+    const capability = getInternalCapability(SYSTEM_CALENDAR_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return {
+            name: call.name,
+            success: false,
+            error: "「TA的系统日历」能力未启用（工具箱 → 内置能力）",
+            continueConversation: false,
+            persistToHistory: false,
+            userNotice: "TA的系统日历能力未启用",
+        };
+    }
+    if (!hasCalendarBridge()) {
+        return { name: call.name, success: false, error: "当前 App 版本不支持写日历，需要更新安卓壳" };
+    }
+    if (!loadSystemCalendarConfig().writeEnabled) {
+        return {
+            name: call.name,
+            success: false,
+            error: "TA 还没有开启「写入日程」（设置 → 系统日历）",
+        };
+    }
+    if (!hasCalendarWritePermission()) {
+        return {
+            name: call.name,
+            success: false,
+            error: "还没有写入日历的权限，需要 TA 去设置里授权",
+        };
+    }
+
+    const title = String(call.args?.title ?? "").trim();
+    const date = String(call.args?.date ?? "").trim();
+    if (!title || !date) {
+        return { name: call.name, success: false, error: "需要 title 和 date 参数" };
+    }
+    const parsed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    if (!parsed) {
+        return { name: call.name, success: false, error: "date 需要是 YYYY-MM-DD 格式" };
+    }
+    const year = Number(parsed[1]);
+    const month = Number(parsed[2]);
+    const day = Number(parsed[3]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+        return { name: call.name, success: false, error: "日期不合法" };
+    }
+
+    const startTime = String(call.args?.startTime ?? "").trim();
+    const endTime = String(call.args?.endTime ?? "").trim();
+    const note = String(call.args?.note ?? "").trim();
+
+    // 时段事件：起止都给了才当时段，否则按全天。
+    // 只给一个时间会让原生侧拿到 0 作为 DTSTART（1970 年），必须在这里拦住。
+    let allDay = true;
+    let startMillis = 0;
+    let endMillis = 0;
+    const timePattern = /^(\d{1,2}):(\d{2})$/;
+    if (startTime) {
+        const startMatch = timePattern.exec(startTime);
+        const endMatch = endTime ? timePattern.exec(endTime) : null;
+        if (!startMatch || !endMatch) {
+            return {
+                name: call.name,
+                success: false,
+                error: "开始和结束时间要一起给，格式 HH:MM",
+            };
+        }
+        const startDate = new Date(year, month - 1, day, Number(startMatch[1]), Number(startMatch[2]));
+        const endDate = new Date(year, month - 1, day, Number(endMatch[1]), Number(endMatch[2]));
+        if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+            return { name: call.name, success: false, error: "时间不合法" };
+        }
+        if (endDate.getTime() <= startDate.getTime()) {
+            return { name: call.name, success: false, error: "结束时间必须晚于开始时间" };
+        }
+        allDay = false;
+        startMillis = startDate.getTime();
+        endMillis = endDate.getTime();
+    }
+
+    const result = insertSystemCalendarEvent({
+        title,
+        allDay,
+        year,
+        month,
+        day,
+        startMillis,
+        endMillis,
+        description: note,
+    });
+    if (!result.ok) {
+        return {
+            name: call.name,
+            success: false,
+            error: result.needPermission ? "还没有写入日历的权限，需要 TA 去设置里授权" : result.reason,
+            userNotice: "没能写进日历",
+        };
+    }
+    const whenText = allDay ? date : `${date} ${startTime}-${endTime}`;
+    return {
+        name: call.name,
+        success: true,
+        data: `已写进 TA 的系统日历：${whenText}「${title}」，到点系统会提醒 TA。`,
+        userNotice: `已把「${title}」记进 TA 的日历`,
+    };
 }
 
 /** 角色主动「看一眼」真实手机。只读，绝不改变用户设备上的任何东西。 */

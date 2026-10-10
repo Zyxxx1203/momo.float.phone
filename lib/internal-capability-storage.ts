@@ -18,6 +18,7 @@ export const TIMED_WAKE_CAPABILITY_ID = "timed_wake";
 export const REALITY_BRIDGE_CAPABILITY_ID = "reality_bridge_send";
 export const PERCEPTION_READ_CAPABILITY_ID = "perception_read";
 export const DEVICE_ACTION_CAPABILITY_ID = "device_action";
+export const SYSTEM_CALENDAR_CAPABILITY_ID = "system_calendar";
 
 /**
  * 内置工具的保留名：用户给现实桥的快捷动作/数据项起名时必须避开。
@@ -31,6 +32,8 @@ export const DEVICE_ACTION_CAPABILITY_ID = "device_action";
 export const RESERVED_INTERNAL_TOOL_NAMES: string[] = [
     "查看TA的手机",
     "操作TA的设备",
+    "看看TA的日程",
+    "记进TA的日历",
     "写入记忆",
     "发送文件",
     "角色电脑",
@@ -1229,6 +1232,15 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
         updatedAt: 0,
     },
     {
+        id: SYSTEM_CALENDAR_CAPABILITY_ID,
+        name: "TA的系统日历",
+        description: "看看{{user}}真实手机日历里有什么安排，也可以把重要的日子写进 TA 的系统日历（到点系统会提醒 TA）。",
+        enabled: false,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
         id: MEMORY_WRITE_CAPABILITY_ID,
         name: "写入记忆",
         description: "将明确、稳定、长期有价值的信息写入长期记忆。仅限关系里程碑、长期偏好、身份信息、重要约定；禁止写入短期情绪、普通寒暄、猜测或未确认内容。",
@@ -1438,8 +1450,107 @@ export function getInternalCapabilityToolDefinition(capability: InternalCapabili
             usageGuide: DEVICE_ACTION_USAGE_GUIDE,
         };
     }
+    if (capability.id === SYSTEM_CALENDAR_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: "{}",
+            usageGuide: SYSTEM_CALENDAR_USAGE_GUIDE,
+        };
+    }
     return null;
 }
+
+/* ---------- 系统日历：角色能看见用户的真实日程，也能写下纪念日 ---------- */
+
+const CALENDAR_READ_PARAMETER_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        daysAhead: {
+            type: "number",
+            description: "往后看几天，默认 7，最大 60。",
+        },
+        daysBack: {
+            type: "number",
+            description: "往前看几天，默认 0，最大 60。用于想知道 TA 刚做了什么。",
+        },
+    },
+});
+
+const CALENDAR_WRITE_PARAMETER_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        title: {
+            type: "string",
+            description: "日程标题，如「我们在一起的第 100 天」。",
+        },
+        date: {
+            type: "string",
+            description: "日期，YYYY-MM-DD。全天事件用这个。",
+        },
+        startTime: {
+            type: "string",
+            description: "可选，HH:MM。填了就是有时段的事件；不填按全天处理。",
+        },
+        endTime: {
+            type: "string",
+            description: "可选，HH:MM。startTime 填了就要填这个。",
+        },
+        note: {
+            type: "string",
+            description: "可选，写在日程描述里的一句话。",
+        },
+    },
+    required: ["title", "date"],
+});
+
+const CALENDAR_READ_TOOL: InternalToolDefinition = {
+    name: "看看TA的日程",
+    description: "读取{{user}}手机系统日历里的真实日程（标题、时间、地点）。",
+    parameterSchema: CALENDAR_READ_PARAMETER_SCHEMA,
+};
+
+const CALENDAR_WRITE_TOOL: InternalToolDefinition = {
+    name: "记进TA的日历",
+    description: "把一个重要的日子写进{{user}}手机的系统日历，到点系统会提醒 TA。",
+    parameterSchema: CALENDAR_WRITE_PARAMETER_SCHEMA,
+};
+
+const SYSTEM_CALENDAR_SUBTOOLS: InternalToolDefinition[] = [
+    CALENDAR_READ_TOOL,
+    CALENDAR_WRITE_TOOL,
+];
+
+const SYSTEM_CALENDAR_USAGE_GUIDE = [
+    "以下是你获取指令的返回结果：",
+    "服务：TA 的系统日历",
+    "用途：两件事——① 看看 TA 真实手机日历里有什么安排；② 把重要的日子写进 TA 的日历。",
+    "",
+    "【重要边界】",
+    "- 读日程是为了让你**知情**（知道 TA 今天忙不忙、有没有安排），不是为了逐条点评。",
+    "  知道 TA 上午有会，就别说「你九点要开会」这种像日程播报的话。",
+    "- 写日程是**真的写进 TA 手机的系统日历**，到点系统会提醒 TA。不是小手机里的记录。",
+    "- 你只能**新增**，不能修改或删除 TA 已有的任何安排。",
+    "- 写入的日程会带标记，TA 一眼能看出哪些是你加的。所以别乱写——写之前想清楚这一天是否真的重要。",
+    "",
+    "动作：看看TA的日程",
+    "参数：",
+    "  - daysAhead (number): 往后看几天，默认 7",
+    "  - daysBack (number): 往前看几天，默认 0",
+    "示例：",
+    '[执行动作:看看TA的日程({"daysAhead":7})]',
+    "",
+    "动作：记进TA的日历",
+    "参数：",
+    "  - title (string, 必填): 日程标题",
+    "  - date (string, 必填): YYYY-MM-DD",
+    "  - startTime / endTime (string): 可选，HH:MM。都填才是时段事件，否则按全天",
+    "  - note (string): 可选，描述里的一句话",
+    "示例：",
+    '[执行动作:记进TA的日历({"title":"我们在一起的第100天","date":"2026-06-18","note":"记得跟她说点什么"})]',
+    "",
+    "如果失败（没授权、没有可写日历），结果里会说明原因，**如实转述**，不要假装成功。",
+].join("\n");
 
 /* ---------- 设备动作：让角色在真实手机上做一件小事 ---------- */
 
@@ -1669,6 +1780,9 @@ export function getInternalCapabilitySubToolDefinition(
     if (capability.id === REALITY_BRIDGE_CAPABILITY_ID) {
         return realityBridgeSubTools().find(tool => tool.name === name) ?? null;
     }
+    if (capability.id === SYSTEM_CALENDAR_CAPABILITY_ID) {
+        return SYSTEM_CALENDAR_SUBTOOLS.find(tool => tool.name === name) ?? null;
+    }
     return null;
 }
 
@@ -1692,6 +1806,9 @@ export function getInternalCapabilitySubToolDefinitions(
     }
     if (capability.id === REALITY_BRIDGE_CAPABILITY_ID) {
         return realityBridgeSubTools();
+    }
+    if (capability.id === SYSTEM_CALENDAR_CAPABILITY_ID) {
+        return SYSTEM_CALENDAR_SUBTOOLS;
     }
     return [];
 }

@@ -87,6 +87,22 @@ class MainActivity : AppCompatActivity() {
     /** 设备动作桥：让网页（进而让角色）在真实手机上做一件小事（边界说明见 DeviceActionBridge）。 */
     private val deviceAction by lazy { DeviceActionBridge(this) }
 
+    /** 日历桥：让角色看见用户的真实日程，也能把纪念日写进系统日历（边界说明见 CalendarBridge）。 */
+    private val calendar by lazy { CalendarBridge(this) }
+
+    /**
+     * 日历权限（读/写）的申请结果回调。
+     *
+     * 与活动识别权限同一套路：网页主动申请，壳只记结果，
+     * 由网页轮询 hasCalendarPermission() 决定下一步——壳不替网页做判断。
+     */
+    private val calendarPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        // 结果由 hasCalendarReadPermission() / hasCalendarWritePermission() 实时查询，
+        // 这里不需要额外动作：权限状态本身就是答案。
+    }
+
     /**
      * 活动识别权限的申请结果回调。
      *
@@ -597,6 +613,65 @@ class MainActivity : AppCompatActivity() {
         /** 是否已授予「使用情况访问」权限（屏幕使用时间的前提）。 */
         @JavascriptInterface
         fun hasUsageStatsAccess(): Boolean = deviceAction.hasUsageStatsAccess()
+
+        // ── 日历桥（读系统日程 / 写角色纪念日）────
+        // 读和写分开报状态：用户可能只想让角色「知道我的安排」，
+        // 但不接受「往我日历里写东西」。两个权限独立授予，所以状态也独立。
+
+        /** 是否已授予读日历权限。 */
+        @JavascriptInterface
+        fun hasCalendarReadPermission(): Boolean = calendar.hasReadPermission()
+
+        /** 是否已授予写日历权限。 */
+        @JavascriptInterface
+        fun hasCalendarWritePermission(): Boolean = calendar.hasWritePermission()
+
+        /**
+         * 申请日历权限。read=true 时申请读，write=true 时申请写。
+         *
+         * 返回 true 表示「现在就已授权」，false 表示弹出了系统对话框、
+         * 结果要稍后由 hasCalendarReadPermission() 等轮询确认。
+         */
+        @JavascriptInterface
+        fun requestCalendarPermission(read: Boolean, write: Boolean): Boolean {
+            val needed = mutableListOf<String>()
+            if (read && !calendar.hasReadPermission()) needed.add(Manifest.permission.READ_CALENDAR)
+            if (write && !calendar.hasWritePermission()) needed.add(Manifest.permission.WRITE_CALENDAR)
+            if (needed.isEmpty()) return true
+            runCatching { calendarPermissionLauncher.launch(needed.toTypedArray()) }
+            return false
+        }
+
+        /** 读未来 daysAhead 天（可含过去 daysBack 天）的系统日程，返回 JSON 数组。 */
+        @JavascriptInterface
+        fun readCalendarEvents(daysAhead: Int, daysBack: Int): String =
+            calendar.readEventsJson(daysAhead, daysBack)
+
+        /**
+         * 往系统日历新增一条日程。只新增，不修改不删除用户已有安排。
+         * allDay=true 时用 year/month/day（month 为 1-12）；否则用 startMillis/endMillis。
+         */
+        @JavascriptInterface
+        fun insertCalendarEvent(
+            title: String,
+            allDay: Boolean,
+            year: Int,
+            month: Int,
+            day: Int,
+            startMillis: Long,
+            endMillis: Long,
+            description: String,
+        ): String = calendar.insertEvent(
+            title, allDay, year, month, day, startMillis, endMillis, description,
+        ).toString()
+
+        /** 删除一条由角色写入的日程（用户后悔时的清理路径）。 */
+        @JavascriptInterface
+        fun deleteCalendarEvent(eventId: Long): String = calendar.deleteOwnEvent(eventId).toString()
+
+        /** 日历能力与授权状态。 */
+        @JavascriptInterface
+        fun getCalendarCapabilities(): String = calendar.capabilitiesJson()
 
         /** 本机支持哪些设备动作（含授权状态）。 */
         @JavascriptInterface

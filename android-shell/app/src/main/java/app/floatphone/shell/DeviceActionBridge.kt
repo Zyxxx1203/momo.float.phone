@@ -1,5 +1,6 @@
 package app.floatphone.shell
 
+import android.app.AppOpsManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -9,7 +10,10 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Process
+import android.provider.AlarmClock
 import android.provider.Settings
+import android.view.KeyEvent
 import org.json.JSONObject
 
 /**
@@ -241,6 +245,161 @@ class DeviceActionBridge(private val context: Context) {
         }
     }
 
+    // ── 闹钟与计时器 ──
+
+    /**
+     * 设一个闹钟。到点由系统的「时钟」App 响铃。
+     *
+     * 刻意**带界面**（EXTRA_SKIP_UI=false）：会打开时钟 App 让用户看到并确认。
+     * 静默设闹钟听起来方便，但用户第二天早上被一个「不知道谁设的」闹钟吵醒，
+     * 比根本没设更糟。让系统界面替我们做最终确认，也符合「不神戳戳」。
+     *
+     * @param hour 0-23
+     * @param minute 0-59
+     */
+    fun setAlarm(hour: Int, minute: Int, message: String): JSONObject {
+        if (hour !in 0..23 || minute !in 0..59) {
+            return JSONObject().put("ok", false).put("reason", "时间不合法（小时 0-23，分钟 0-59）")
+        }
+        return try {
+            val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                putExtra(AlarmClock.EXTRA_HOUR, hour)
+                putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                if (message.isNotBlank()) putExtra(AlarmClock.EXTRA_MESSAGE, message.take(80))
+                putExtra(AlarmClock.EXTRA_SKIP_UI, false)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            JSONObject()
+                .put("ok", true)
+                .put("hour", hour)
+                .put("minute", minute)
+                .put("needsConfirm", true)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", "这台设备没有可用的时钟应用")
+        }
+    }
+
+    /**
+     * 设一个倒计时。到点由「时钟」App 提醒。
+     *
+     * 与闹钟不同，计时器**直接启动**（EXTRA_SKIP_UI=true）：它的语义就是
+     * 「从现在开始数 N 分钟」，多一次确认反而打断节奏；而且时长有限，
+     * 即使设错了也不会像闹钟那样在半夜响。
+     */
+    fun setTimer(seconds: Int, message: String): JSONObject {
+        if (seconds !in 1..86_400) {
+            return JSONObject().put("ok", false).put("reason", "时长需在 1 秒到 24 小时之间")
+        }
+        return try {
+            val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
+                putExtra(AlarmClock.EXTRA_LENGTH, seconds)
+                if (message.isNotBlank()) putExtra(AlarmClock.EXTRA_MESSAGE, message.take(80))
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            JSONObject().put("ok", true).put("seconds", seconds)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", "这台设备没有可用的时钟应用")
+        }
+    }
+
+    // ── 媒体播放控制 ──
+
+    /**
+     * 控制正在播放的音乐（暂停/继续/上一首/下一首）。
+     *
+     * 用 dispatchMediaKeyEvent 模拟媒体按键，而不是直接操作某个播放器：
+     * 用户可能用网易云、Spotify、B站，模拟按键对**任何**支持媒体按键的
+     * 播放器都有效，而直接调 API 只能覆盖装了 SDK 的那一个。
+     *
+     * 零权限。副作用要说清楚：它控制的是「当前抢到媒体焦点的播放器」，
+     * 如果同时开着好几个，动的可能不是用户以为的那个。
+     */
+    fun mediaControl(action: String): JSONObject {
+        val keyCode = when (action) {
+            "play" -> KeyEvent.KEYCODE_MEDIA_PLAY
+            "pause" -> KeyEvent.KEYCODE_MEDIA_PAUSE
+            "toggle" -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "next" -> KeyEvent.KEYCODE_MEDIA_NEXT
+            "prev" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            "stop" -> KeyEvent.KEYCODE_MEDIA_STOP
+            else -> return JSONObject().put("ok", false).put("reason", "未知的播放操作：$action")
+        }
+        return try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            // 必须成对下发 DOWN/UP：只发 DOWN 会让播放器一直处于「按键按住」状态。
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            JSONObject().put("ok", true).put("action", action)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "媒体控制不可用")
+        }
+    }
+
+    // ── 打开网页 ──
+
+    /**
+     * 用系统浏览器打开一个链接。
+     *
+     * 安全校验（必须保留）：只放行 http/https，且必须是合法 URL。
+     * 不校验的话，模型可以传 `intent://` 之类的 scheme 去触发任意组件，
+     * `file://` 也可能被用来读取本地文件——这是把「让角色分享链接」
+     * 变成「开了一个任意 Intent 后门」。
+     */
+    fun openUrl(url: String): JSONObject {
+        val trimmed = url.trim()
+        if (trimmed.isBlank()) {
+            return JSONObject().put("ok", false).put("reason", "链接不能为空")
+        }
+        val lower = trimmed.lowercase()
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+            return JSONObject().put("ok", false).put("reason", "只支持 http/https 链接")
+        }
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(trimmed)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            JSONObject().put("ok", true).put("url", trimmed)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", "没有能打开这个链接的应用")
+        }
+    }
+
+    // ── 使用情况访问（屏幕使用时间）──
+
+    /**
+     * 是否已授予「使用情况访问」权限。
+     *
+     * 这是**特殊权限**（AppOps），不能用 requestPermissions 弹窗申请，
+     * 只能跳系统设置页让用户手动开。所以这里只如实回答状态，
+     * 由网页显示「去授权」并跳转。
+     */
+    fun hasUsageStatsAccess(): Boolean {
+        return try {
+            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    context.packageName,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    context.packageName,
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
     // ── 打开系统设置页（引导用户授权用）──
 
     /**
@@ -252,6 +411,7 @@ class DeviceActionBridge(private val context: Context) {
             "write_settings" -> Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
                 .setData(Uri.parse("package:${context.packageName}"))
             "dnd" -> Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+            "usage_stats" -> Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
             "accessibility" -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             "battery" -> Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
             "app_details" -> Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
@@ -284,5 +444,11 @@ class DeviceActionBridge(private val context: Context) {
         .put("dnd", true)
         .put("dndGranted", canSetDnd())
         .put("openApp", true)
+        .put("alarm", true)
+        .put("timer", true)
+        .put("media", true)
+        .put("openUrl", true)
+        .put("usageStats", true)
+        .put("usageStatsGranted", hasUsageStatsAccess())
         .toString()
 }

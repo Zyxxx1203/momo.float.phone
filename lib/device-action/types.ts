@@ -22,7 +22,13 @@ export type DeviceActionId =
   | "brightnessGranted"
   | "dnd"
   | "dndGranted"
-  | "openApp";
+  | "openApp"
+  | "alarm"
+  | "timer"
+  | "media"
+  | "openUrl"
+  | "usageStats"
+  | "usageStatsGranted";
 
 /** 壳如实上报的设备动作支持表。 */
 export type DeviceActionCapabilities = Partial<Record<DeviceActionId, boolean>>;

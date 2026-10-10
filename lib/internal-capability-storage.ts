@@ -1448,7 +1448,7 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
     properties: {
         action: {
             type: "string",
-            description: "要做什么：torch=手电筒开关，volume=调音量，brightness=调屏幕亮度，dnd=勿扰模式开关，openApp=打开一个应用。",
+            description: "要做什么：torch=手电筒，volume=音量，brightness=屏幕亮度，dnd=勿扰模式，openApp=打开应用，alarm=设闹钟，timer=设倒计时，media=音乐播放控制，openUrl=打开网页。",
         },
         on: {
             type: "boolean",
@@ -1464,11 +1464,35 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
         },
         mode: {
             type: "string",
-            description: "action=volume 时用：up=调高，down=调低，set=设为指定值，mute=静音。默认 up。",
+            description: "action=volume 时用：up=调高，down=调低，set=设为指定值，mute=静音，默认 up；action=media 时用：play/pause/toggle/next/prev/stop，默认 toggle。",
         },
         app: {
             type: "string",
             description: "action=openApp 时用：应用名（如「美团」）或包名。",
+        },
+        hour: {
+            type: "number",
+            description: "action=alarm 时用：小时 0-23。",
+        },
+        minute: {
+            type: "number",
+            description: "action=alarm 时用：分钟 0-59，默认 0。",
+        },
+        minutes: {
+            type: "number",
+            description: "action=timer 时用：倒计时多少分钟。与 seconds 二选一。",
+        },
+        seconds: {
+            type: "number",
+            description: "action=timer 时用：倒计时多少秒。",
+        },
+        url: {
+            type: "string",
+            description: "action=openUrl 时用：要打开的网页链接，必须 http/https 开头。",
+        },
+        message: {
+            type: "string",
+            description: "action=alarm/timer 时用：闹钟或倒计时的备注（会显示在时钟里）。",
         },
 
     },
@@ -1478,7 +1502,7 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
 const DEVICE_ACTION_USAGE_GUIDE = [
     "以下是你获取指令的返回结果：",
     "动作：操作TA的设备",
-    "用途：在{{user}}的真实手机上做一件小事——开手电筒、调音量、调亮度、开勿扰、打开某个应用。",
+    "用途：在{{user}}的真实手机上做一件小事——开手电筒、调音量、调亮度、开勿扰、打开应用、设闹钟/倒计时、控制音乐播放、打开网页。",
     "",
     "【重要边界】",
     "- 这些动作**会真的在 TA 手机上生效**，对方立刻能看到/听到。不是聊天里的模拟。",
@@ -1486,6 +1510,12 @@ const DEVICE_ACTION_USAGE_GUIDE = [
     "- 深夜开灯、突然静音这类动作可能吓到人或影响睡觉，动手前想清楚。",
     "- 调音量/亮度/勿扰都是**持久改动**，做过之后不会自己变回来；如果有必要，记得之后再帮 TA 调回去。",
     "- 你**做不到**：发短信、打电话、读通讯录、删东西、装应用、改别人 App 里的内容。",
+    "",
+    "【闹钟 / 倒计时 / 音乐 / 网页的用法】",
+    "- timer 最常用：想提醒 TA 休息、吃饭、别熬夜，用 minutes 设一个倒计时即可，不会打扰别人。",
+    "- alarm 会打开系统的时钟界面让 TA 确认，所以你设完只能说「闹钟交给你了，去确认一下」，别说成已经响定了。",
+    "- media 控制的是「当前正在播放的音乐」，可能不是你说的那首；控制完别断言现在放的是什么。",
+    "- openUrl 会把 TA 带离小手机去看网页，只在确实要分享内容时用。",
     "",
     "【打开应用的用法】",
     "openApp 会把 TA 的屏幕切到别的应用——这是最有存在感的动作，别随便用。",
@@ -1507,6 +1537,10 @@ const DEVICE_ACTION_USAGE_GUIDE = [
     '[执行动作:操作TA的设备({"action":"brightness","level":30})]',
     '[执行动作:操作TA的设备({"action":"dnd","on":true})]',
     '[执行动作:操作TA的设备({"action":"openApp","app":"美团"})]',
+    '[执行动作:操作TA的设备({"action":"timer","minutes":20,"message":"记得起来活动一下"})]',
+    '[执行动作:操作TA的设备({"action":"media","mode":"pause"})]',
+    '[执行动作:操作TA的设备({"action":"alarm","hour":7,"minute":30,"message":"起床啦"})]',
+    '[执行动作:操作TA的设备({"action":"openUrl","url":"https://example.com"})]',
     "",
     "如果失败，结果里会说明原因（比如没有权限、设备没有闪光灯、TA 关掉了这个动作）。**如实转述原因，不要假装成功**；需要授权的，可以提醒 TA 去设置里打开。",
     "成功时 TA 会收到一条通知（除非 TA 关了通知），所以你不用特意报告——但对话里自然提一句会更亲切。",

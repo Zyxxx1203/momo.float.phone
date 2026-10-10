@@ -18,6 +18,11 @@ type DeviceActionBridgeLike = {
   setDnd?: (on: boolean) => string;
   openApp?: (packageName: string) => string;
   findPackageByLabel?: (label: string) => string;
+  setAlarm?: (hour: number, minute: number, message: string) => string;
+  setTimer?: (seconds: number, message: string) => string;
+  mediaControl?: (action: string) => string;
+  openUrl?: (url: string) => string;
+  hasUsageStatsAccess?: () => boolean;
   getDeviceActionCapabilities?: () => string;
   openSystemSettings?: (which: string) => boolean;
 };
@@ -118,6 +123,59 @@ export function openApp(packageName: string): DeviceActionResult {
     return parseResult(raw, "应用未能打开");
   } catch {
     return { ok: false, reason: "打开应用失败" };
+  }
+}
+
+/** 设闹钟（系统时钟 App 会打开让用户确认）。 */
+export function setAlarm(hour: number, minute: number, message = ""): DeviceActionResult {
+  try {
+    const raw = bridge()?.setAlarm?.(hour, minute, message);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持设闹钟" };
+    return parseResult(raw, "闹钟未能设置");
+  } catch {
+    return { ok: false, reason: "设置闹钟失败" };
+  }
+}
+
+/** 设倒计时（秒）。 */
+export function setTimer(seconds: number, message = ""): DeviceActionResult {
+  try {
+    const raw = bridge()?.setTimer?.(seconds, message);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持设倒计时" };
+    return parseResult(raw, "倒计时未能设置");
+  } catch {
+    return { ok: false, reason: "设置倒计时失败" };
+  }
+}
+
+/** 媒体播放控制：play / pause / toggle / next / prev / stop。 */
+export function mediaControl(action: string): DeviceActionResult {
+  try {
+    const raw = bridge()?.mediaControl?.(action);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持媒体控制" };
+    return parseResult(raw, "媒体控制失败");
+  } catch {
+    return { ok: false, reason: "媒体控制调用失败" };
+  }
+}
+
+/** 用系统浏览器打开链接（只放行 http/https）。 */
+export function openUrl(url: string): DeviceActionResult {
+  try {
+    const raw = bridge()?.openUrl?.(url);
+    if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持打开网页" };
+    return parseResult(raw, "链接未能打开");
+  } catch {
+    return { ok: false, reason: "打开链接失败" };
+  }
+}
+
+/** 是否已授予「使用情况访问」权限。 */
+export function hasUsageStatsAccess(): boolean {
+  try {
+    return bridge()?.hasUsageStatsAccess?.() === true;
+  } catch {
+    return false;
   }
 }
 

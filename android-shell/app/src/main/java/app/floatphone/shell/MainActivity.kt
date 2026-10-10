@@ -576,6 +576,28 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun findPackageByLabel(label: String): String = deviceAction.findPackageByLabel(label)
 
+        /** 设闹钟（会打开系统时钟 App 让用户确认）。 */
+        @JavascriptInterface
+        fun setAlarm(hour: Int, minute: Int, message: String): String =
+            deviceAction.setAlarm(hour, minute, message).toString()
+
+        /** 设倒计时（直接启动，秒为单位）。 */
+        @JavascriptInterface
+        fun setTimer(seconds: Int, message: String): String =
+            deviceAction.setTimer(seconds, message).toString()
+
+        /** 媒体播放控制：action=play/pause/toggle/next/prev/stop。 */
+        @JavascriptInterface
+        fun mediaControl(action: String): String = deviceAction.mediaControl(action).toString()
+
+        /** 用系统浏览器打开链接（只放行 http/https）。 */
+        @JavascriptInterface
+        fun openUrl(url: String): String = deviceAction.openUrl(url).toString()
+
+        /** 是否已授予「使用情况访问」权限（屏幕使用时间的前提）。 */
+        @JavascriptInterface
+        fun hasUsageStatsAccess(): Boolean = deviceAction.hasUsageStatsAccess()
+
         /** 本机支持哪些设备动作（含授权状态）。 */
         @JavascriptInterface
         fun getDeviceActionCapabilities(): String = deviceAction.capabilitiesJson()

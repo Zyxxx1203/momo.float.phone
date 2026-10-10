@@ -16,10 +16,14 @@
 import {
   findPackageByLabel,
   hasDeviceActionBridge,
+  mediaControl,
   openApp,
+  openUrl,
   readDeviceActionCapabilities,
+  setAlarm,
   setBrightness,
   setDnd,
+  setTimer,
   setTorch,
   setVolume,
 } from "./bridge";
@@ -54,9 +58,13 @@ export function checkActionAvailability(actionId: string): {
   const bridgeAvailable = hasDeviceActionBridge();
   const id = actionId as keyof typeof caps;
   const supported = caps[id] === true;
-  // 亮度/勿扰有独立的授权状态：有能力但没授权，与「根本不支持」是两回事
-  const granted = actionId === "brightness" ? caps.brightnessGranted !== false
-    : actionId === "dnd" ? caps.dndGranted !== false
+  // 亮度/勿扰/使用情况访问有独立的授权状态：有能力但没授权，与「根本不支持」是两回事。
+  // 全用 `=== true` 而不是 `!== false`：这些授权默认就是没有的，
+  // 老壳不上报该字段时（undefined）必须算「未授权」，否则会显示成已授权、
+  // 用户点了却发现功能不工作。
+  const granted = actionId === "brightness" ? caps.brightnessGranted === true
+    : actionId === "dnd" ? caps.dndGranted === true
+    : actionId === "usageStats" ? caps.usageStatsGranted === true
     : true;
   const configEnabled = config.enabled;
   const userEnabled = isActionEnabled(config, actionId as never);
@@ -70,10 +78,11 @@ export function checkActionAvailability(actionId: string): {
   };
 }
 
-/** 取壳上报的授权状态（设置面板给「去授权」按钮用）。 */
-export function readGrantStatus(): { brightness: boolean; dnd: boolean } {
+/** 取壳上报的授权状态（设置面板给「去授权」按钮用，也给感知读取用）。 */
+export function readGrantStatus(): { brightness: boolean; dnd: boolean; usageStats: boolean } {
   const caps = readDeviceActionCapabilities();
   return {
+    usageStats: caps.usageStatsGranted === true,
     brightness: caps.brightnessGranted === true,
     dnd: caps.dndGranted === true,
   };
@@ -184,6 +193,72 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       const result = openApp(pkg);
       if (!result.ok) return { ok: false, reason: result.reason };
       return { ok: true, action: "openApp", message: `已打开「${label}」` };
+    }
+
+    // ── 闹钟：带系统界面，用户自己确认时间 ──
+    case "alarm": {
+      const blocked = allowed("alarm");
+      if (blocked) return blocked;
+      const hour = Number(args.hour);
+      const minute = Number(args.minute ?? 0);
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+        return { ok: false, reason: "需要 hour 参数（0-23）" };
+      }
+      if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
+        return { ok: false, reason: "minute 需要在 0-59 之间" };
+      }
+      const note = String(args.message ?? "").trim();
+      const result = setAlarm(hour, minute, note);
+      if (!result.ok) return { ok: false, reason: result.reason };
+      const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+      // needsConfirm 时系统界面已弹出，结果以用户确认为准，措辞不能说得太满
+      return { ok: true, action: "alarm", message: `闹钟 ${hhmm} 已交给系统时钟（请在时钟里确认）` };
+    }
+
+    case "timer": {
+      const blocked = allowed("timer");
+      if (blocked) return blocked;
+      // 允许模型传 minutes 或 seconds，优先 minutes（更符合说话的粒度）
+      const minutes = Number(args.minutes);
+      const secondsArg = Number(args.seconds);
+      const seconds = Number.isFinite(minutes) && minutes > 0
+        ? Math.round(minutes * 60)
+        : Math.round(secondsArg);
+      if (!Number.isFinite(seconds) || seconds < 1 || seconds > 86_400) {
+        return { ok: false, reason: "需要 minutes 或 seconds 参数（最长 24 小时）" };
+      }
+      const note = String(args.message ?? "").trim();
+      const result = setTimer(seconds, note);
+      if (!result.ok) return { ok: false, reason: result.reason };
+      const human = seconds >= 60 ? `${Math.round(seconds / 60)} 分钟` : `${seconds} 秒`;
+      return { ok: true, action: "timer", message: `倒计时已开始（${human}）` };
+    }
+
+    case "media": {
+      const blocked = allowed("media");
+      if (blocked) return blocked;
+      const op = String(args.mode ?? args.op ?? "toggle");
+      const result = mediaControl(op);
+      if (!result.ok) return { ok: false, reason: result.reason };
+      const label: Record<string, string> = {
+        play: "已继续播放",
+        pause: "已暂停",
+        toggle: "已切换播放状态",
+        next: "已切到下一首",
+        prev: "已切到上一首",
+        stop: "已停止播放",
+      };
+      return { ok: true, action: "media", message: label[op] ?? "已发送播放控制" };
+    }
+
+    case "openUrl": {
+      const blocked = allowed("openUrl");
+      if (blocked) return blocked;
+      const url = String(args.url ?? "").trim();
+      if (!url) return { ok: false, reason: "缺少 url 参数" };
+      const result = openUrl(url);
+      if (!result.ok) return { ok: false, reason: result.reason };
+      return { ok: true, action: "openUrl", message: "已在浏览器里打开" };
     }
 
     default:

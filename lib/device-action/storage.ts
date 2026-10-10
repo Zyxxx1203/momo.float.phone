@@ -33,6 +33,10 @@ export const TOGGLEABLE_ACTIONS: DeviceActionId[] = [
   "brightness",
   "dnd",
   "openApp",
+  "alarm",
+  "timer",
+  "media",
+  "openUrl",
 ];
 
 export const DEVICE_ACTION_LABEL: Record<DeviceActionId, string> = {
@@ -43,6 +47,12 @@ export const DEVICE_ACTION_LABEL: Record<DeviceActionId, string> = {
   dnd: "勿扰模式",
   dndGranted: "勿扰模式授权",
   openApp: "打开应用",
+  alarm: "设闹钟",
+  timer: "设倒计时",
+  media: "音乐播放控制",
+  openUrl: "打开网页",
+  usageStats: "使用情况访问",
+  usageStatsGranted: "使用情况访问授权",
 };
 
 /**
@@ -57,6 +67,12 @@ export const DEVICE_ACTION_DESC: Record<DeviceActionId, string> = {
   dnd: "开关勿扰模式。场景：陪你睡时帮你静音。需要勿扰访问权限；开着的时候你会漏接电话，所以请留意角色有没有帮你关回来。",
   dndGranted: "是否已授予勿扰模式访问权限。",
   openApp: "打开某个应用。场景：想让你陪它就打开小手机、想让你学习就打开专注应用、提醒你吃饭就打开外卖。注意它会把你的屏幕切走，所以默认关闭——要用请自己打开。",
+  alarm: "设一个闹钟。会打开系统时钟 App 让你确认时间，不会静默设置。",
+  timer: "设一个倒计时，到点由系统时钟提醒。适合「20 分钟后叫你休息」这类。",
+  media: "控制正在播放的音乐：暂停、继续、上一首、下一首。对任何支持媒体按键的播放器都有效。",
+  openUrl: "用系统浏览器打开一个链接。只支持 http/https，会离开小手机。",
+  usageStats: "读取各应用的使用时长（屏幕使用时间）。需要在系统设置里单独授权「使用情况访问」——这是特殊权限，不能弹窗申请。",
+  usageStatsGranted: "是否已授予「使用情况访问」权限。",
 };
 
 export type DeviceActionConfig = {

@@ -11,7 +11,7 @@
 // 挂载方式与 PerceptionSettings 一致：直接渲染内容，不套 PageShell、不收 onBack。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Lightbulb, Moon, Smartphone, Sun, Volume2, Zap } from "lucide-react";
+import { AlarmClock, Globe, Lightbulb, Moon, Music, Smartphone, Sun, Timer, Volume2, Zap } from "lucide-react";
 
 import { Toggle } from "@/components/ui/form";
 import {
@@ -29,12 +29,17 @@ import {
 } from "@/lib/device-action";
 import { isShellEnvironment as isShell } from "@/lib/shell-call-overlay";
 
+
 const ACTION_ICONS: Record<string, typeof Lightbulb> = {
   torch: Lightbulb,
   volume: Volume2,
   brightness: Sun,
   dnd: Moon,
   openApp: Smartphone,
+  alarm: AlarmClock,
+  timer: Timer,
+  media: Music,
+  openUrl: Globe,
 };
 
 export function DeviceActionSettings({ onNotice }: { onNotice?: (msg: string) => void }) {
@@ -82,6 +87,13 @@ export function DeviceActionSettings({ onNotice }: { onNotice?: (msg: string) =>
     // 用户开的时候明确说一句，避免出现「手机怎么静音了」的困惑。
     if (on && (id === "volume" || id === "brightness" || id === "dnd")) {
       onNotice?.(`「${DEVICE_ACTION_LABEL[id]}」的改动是持久的，角色调过之后不会自动恢复`);
+    }
+    // 会把用户带离小手机的三个动作，开启时把后果说清楚
+    if (on && (id === "media" || id === "openUrl" || id === "openApp")) {
+      onNotice?.(`开启后角色可以${DEVICE_ACTION_LABEL[id]}，你的屏幕可能会被切走`);
+    }
+    if (on && id === "alarm") {
+      onNotice?.("角色设闹钟时会打开系统时钟界面，需要你确认才会真正生效");
     }
   }, [update, onNotice, caps]);
 
@@ -147,6 +159,8 @@ export function DeviceActionSettings({ onNotice }: { onNotice?: (msg: string) =>
               const granted = id === "brightness" ? grants.brightness
                 : id === "dnd" ? grants.dnd
                 : true;
+              // media / openUrl / alarm / timer 会把用户带离小手机或改变系统响铃，
+              // 开启时明确提醒一句——这几个的存在感比手电筒强得多。
               const needGrant = supported && !granted;
               return (
                 <div className="per-cap" key={id} data-available={userEnabled && supported && granted ? "true" : "false"}>
@@ -236,6 +250,30 @@ export function DeviceActionSettings({ onNotice }: { onNotice?: (msg: string) =>
                 <span className="menu-label">勿扰访问权限</span>
                 <span className="menu-desc">{grants.dnd ? "已授权（可开关勿扰）" : "未授权，勿扰会失败"}</span>
               </div>
+            </div>
+            <div className="menu-item" style={{ cursor: "default" }}>
+              <div className="menu-label-group">
+                <span className="menu-label">使用情况访问权限</span>
+                <span className="menu-desc">
+                  {grants.usageStats
+                    ? "已授权（角色可读取各应用使用时长）"
+                    : "未授权。这是特殊权限，只能去系统设置里手动开"}
+                </span>
+              </div>
+              {!grants.usageStats && (
+                <button
+                  type="button"
+                  className="ui-btn ui-btn-outline"
+                  onClick={() => {
+                    const ok = openSystemSettings("usage_stats");
+                    onNotice?.(ok
+                      ? "请在系统页面里找到「小手机」并允许使用情况访问"
+                      : "没能打开系统设置，请手动到「设置 → 应用 → 特殊应用权限 → 使用情况访问」里授权");
+                  }}
+                >
+                  去授权
+                </button>
+              )}
             </div>
           </div>
           <div className="per-actions">

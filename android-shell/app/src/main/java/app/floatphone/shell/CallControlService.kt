@@ -29,6 +29,9 @@ class CallControlService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
+        // 把实例交给截屏桥：takeScreenshot() 是 AccessibilityService 的方法，
+        // 只能在服务实例上调用，且必须等服务连上之后才可用。
+        ScreenshotBridge.attach(this)
         ShellBus.dispatchOverlayEvent("accessibility", JSONObject().put("connected", true))
     }
 
@@ -50,6 +53,8 @@ class CallControlService : AccessibilityService() {
 
     override fun onDestroy() {
         connected = false
+        // 摘掉实例，否则重连前截屏桥会拿着一个已销毁的服务去调 takeScreenshot。
+        ScreenshotBridge.attach(null)
         super.onDestroy()
     }
 }

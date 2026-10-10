@@ -854,6 +854,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        /**
+         * 截屏能力与状态（系统是否支持、无障碍是否已开启）。
+         * 设置面板据此显示三态：不支持 / 要开无障碍 / 可用。
+         */
+        @JavascriptInterface
+        fun getScreenshotCapabilities(): String = ScreenshotBridge.capabilitiesJson()
+
+        /**
+         * 让原生截一张当前屏幕。
+         *
+         * 返回是否**受理**（拿不到无障碍实例或版本过低时直接给失败原因）——
+         * 画面本身是异步的，稍后经 window 的 'shell-call-overlay' 事件
+         * （action='screenshot'）推回网页。之所以不在这里同步返回图片：
+         * takeScreenshot 是回调式 API，且编码几 MB 的 PNG 不能阻塞主线程。
+         */
+        @JavascriptInterface
+        fun captureScreenshot(): String = ScreenshotBridge.capture().toString()
+
         /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
         @JavascriptInterface
         fun openAppSettings() {

@@ -41,7 +41,7 @@ type ShellBridgeLike = {
 };
 
 /** 原生浮窗事件 */
-export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp";
+export type ShellOverlayAction = "restore" | "hangup" | "reply" | "tick" | "needPermission" | "accessibility" | "foregroundApp" | "screenshot";
 
 export type ShellOverlayEvent = {
     action: ShellOverlayAction;
@@ -53,6 +53,18 @@ export type ShellOverlayEvent = {
     callId?: string;
     /** action='foregroundApp' 时的前台包名 */
     package?: string;
+    /** action='screenshot'：截屏是否成功 */
+    ok?: boolean;
+    /** action='screenshot' 失败时的原因 */
+    reason?: string;
+    /** action='screenshot' 成功时的 PNG base64（不含 data: 前缀） */
+    base64?: string;
+    /** action='screenshot' 成功时画面的宽 */
+    width?: number;
+    /** action='screenshot' 成功时画面的高 */
+    height?: number;
+    /** action='screenshot' 成功时 PNG 字节数 */
+    bytes?: number;
 };
 
 /** 原生事件到达时触发（跨页面/跨组件订阅用） */

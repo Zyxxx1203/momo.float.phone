@@ -33,7 +33,7 @@ import {
     loadPerceptionStatus,
     markQueryPerformed,
 } from "./perception";
-import { runDeviceAction } from "./device-action";
+import { notifyDeviceAction, runDeviceAction } from "./device-action";
 import { bridgeConnection, loadBridgeDataItems, loadBridgeShortcutActions, readAllBridgeStateSnapshots, readBridgeStateSnapshot } from "./reality-bridge/storage";
 import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
@@ -802,7 +802,7 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     if (call.name === "角色电脑") return executeAgentComputerTool(call, context);
     if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
     if (call.name === "查看TA的手机") return executePerceptionReadTool(call, context);
-    if (call.name === "操作TA的设备") return executeDeviceActionTool(call);
+    if (call.name === "操作TA的设备") return executeDeviceActionTool(call, context);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
     if (call.name !== "写入记忆") return null;
@@ -882,7 +882,7 @@ async function executePerceptionReadTool(call: ToolCall, context?: ToolExecution
  *  - 失败必须把原因如实交回给角色，让它转述，而不是笼统报「执行失败」；
  *  - 成功也回一句人话，角色才知道到底做了什么（亮度调到几、音量现在多大）。
  */
-async function executeDeviceActionTool(call: ToolCall): Promise<ToolResult> {
+async function executeDeviceActionTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
     const capability = getInternalCapability(DEVICE_ACTION_CAPABILITY_ID);
     if (!capability || !capability.enabled || capability.mode === "off") {
         return {
@@ -899,6 +899,9 @@ async function executeDeviceActionTool(call: ToolCall): Promise<ToolResult> {
     if (!outcome.ok) {
         // 失败也 persistToHistory=false：不让一条失败的尝试留在历史里
         // 诱导模型下一轮继续纠结同一个动作。
+        //
+        // 失败**不**发系统通知：设备上什么都没变，弹一条「操作失败」只会打扰用户。
+        // 原因交回角色，由它在对话里自然带一句。
         return {
             name: call.name,
             success: false,
@@ -906,6 +909,27 @@ async function executeDeviceActionTool(call: ToolCall): Promise<ToolResult> {
             userNotice: outcome.reason || "设备动作执行失败",
         };
     }
+
+    // 反馈：成功了才通知。userNotice 只会在聊天室里落一条 [执行动作] 消息，
+    // 用户在小手机桌面或 App 后台时完全看不到——那正是「神戳戳」。
+    // notifyDeviceAction 走的是与角色发消息同一条链路（desktop-shell 统一判断
+    // 「是否正在看这个会话」，不是才弹系统通知），所以免打扰规则天然一致。
+    try {
+        const character = context?.characterId
+            ? loadCharacters().find(c => c.id === context.characterId)
+            : undefined;
+        notifyDeviceAction({
+            sessionId: context?.sessionId,
+            characterName: character?.name,
+            avatar: character?.avatar ?? null,
+            message: outcome.message || "已执行",
+            action: outcome.action || "",
+        });
+    } catch (err) {
+        // 通知失败绝不能影响动作本身——动作已经真的发生了。
+        console.warn("[设备动作] 反馈通知失败", err);
+    }
+
     return {
         name: call.name,
         success: true,

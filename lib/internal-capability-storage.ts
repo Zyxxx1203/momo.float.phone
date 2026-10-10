@@ -1428,7 +1428,7 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
     properties: {
         action: {
             type: "string",
-            description: "要做什么：torch=手电筒开关，volume=调音量，brightness=调屏幕亮度，dnd=勿扰模式开关。",
+            description: "要做什么：torch=手电筒开关，volume=调音量，brightness=调屏幕亮度，dnd=勿扰模式开关，openApp=打开一个应用。",
         },
         on: {
             type: "boolean",
@@ -1446,6 +1446,10 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
             type: "string",
             description: "action=volume 时用：up=调高，down=调低，set=设为指定值，mute=静音。默认 up。",
         },
+        app: {
+            type: "string",
+            description: "action=openApp 时用：应用名（如「美团」）或包名。",
+        },
 
     },
     required: ["action"],
@@ -1454,29 +1458,38 @@ const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
 const DEVICE_ACTION_USAGE_GUIDE = [
     "以下是你获取指令的返回结果：",
     "动作：操作TA的设备",
-    "用途：在{{user}}的真实手机上做一件小事——开手电筒、调音量、调亮度、开勿扰。",
+    "用途：在{{user}}的真实手机上做一件小事——开手电筒、调音量、调亮度、开勿扰、打开某个应用。",
     "",
     "【重要边界】",
     "- 这些动作**会真的在 TA 手机上生效**，对方立刻能看到/听到。不是聊天里的模拟。",
     "- 只在确实有用时才做，并且做完要自然说一句你做了什么。别为了刷存在感乱动。",
     "- 深夜开灯、突然静音这类动作可能吓到人或影响睡觉，动手前想清楚。",
+    "- 调音量/亮度/勿扰都是**持久改动**，做过之后不会自己变回来；如果有必要，记得之后再帮 TA 调回去。",
     "- 你**做不到**：发短信、打电话、读通讯录、删东西、装应用、改别人 App 里的内容。",
+    "",
+    "【打开应用的用法】",
+    "openApp 会把 TA 的屏幕切到别的应用——这是最有存在感的动作，别随便用。",
+    "合适的场合：想让 TA 回来陪你 → 打开小手机自己；TA 说要学习/工作 → 打开专注类应用；",
+    "到饭点了 → 打开外卖应用。用之前先确认你们聊到了这件事，别自说自话把人带走。",
     "",
     "各动作的参数：",
     "动作：操作TA的设备",
-    "- action (string, 必填): torch / volume / brightness / dnd",
+    "- action (string, 必填): torch / volume / brightness / dnd / openApp",
     "- on (boolean): action=torch/dnd 时用，true 开 false 关",
     "- level (number): action=brightness 时用 1-100；action=volume 且 mode=set 时用 0-100",
     "- stream (string): action=volume 时用 media/ring/alarm/notification，默认 media",
     "- mode (string): action=volume 时用 up/down/set/mute，默认 up",
+    "- app (string): action=openApp 时用，应用名或包名",
     "",
     "示例：",
     '[执行动作:操作TA的设备({"action":"torch","on":true})]',
     '[执行动作:操作TA的设备({"action":"volume","mode":"down"})]',
     '[执行动作:操作TA的设备({"action":"brightness","level":30})]',
     '[执行动作:操作TA的设备({"action":"dnd","on":true})]',
+    '[执行动作:操作TA的设备({"action":"openApp","app":"美团"})]',
     "",
-    "如果失败，结果里会说明原因（比如没有权限、设备没有闪光灯）。**如实转述原因，不要假装成功**；需要授权的，可以提醒 TA 去设置里打开。",
+    "如果失败，结果里会说明原因（比如没有权限、设备没有闪光灯、TA 关掉了这个动作）。**如实转述原因，不要假装成功**；需要授权的，可以提醒 TA 去设置里打开。",
+    "成功时 TA 会收到一条通知（除非 TA 关了通知），所以你不用特意报告——但对话里自然提一句会更亲切。",
 ].join("\n");
 
 /* ---------- 感知读取：让角色主动看一眼真实手机 ---------- */

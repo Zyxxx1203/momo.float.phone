@@ -22,15 +22,17 @@ registerKvMigration(CONFIG_KEY);
  * 可在设置里单独开关的动作（授权状态类的不算）。
  *
  * 每一项都必须能回答「角色为什么需要做这个」——答不上来的不接。
- * 「打开应用」被剔除：角色打开别的 App 会把用户从小手机里踢出去，
- * 与「沉浸聊天」这个核心体验直接冲突，而它本身又想不出合理场景。
- * 原生桥里保留了这个能力（将来若有明确用途可以再开放），只是不暴露给角色。
+ * 「打开应用」一度被剔除（担心把用户踢出小手机），但用户给出了三个
+ * 成立的场景后恢复：想让人陪 → 打开小手机自己；想让人学习 → 打开专注类
+ * 应用；提醒吃饭 → 打开外卖应用。**它的价值恰恰是「把用户带走去做正事」**，
+ * 所以单列一条说明，并默认关闭。
  */
 export const TOGGLEABLE_ACTIONS: DeviceActionId[] = [
   "torch",
   "volume",
   "brightness",
   "dnd",
+  "openApp",
 ];
 
 export const DEVICE_ACTION_LABEL: Record<DeviceActionId, string> = {
@@ -54,7 +56,7 @@ export const DEVICE_ACTION_DESC: Record<DeviceActionId, string> = {
   brightnessGranted: "是否已授予「修改系统设置」权限。",
   dnd: "开关勿扰模式。场景：陪你睡时帮你静音。需要勿扰访问权限；开着的时候你会漏接电话，所以请留意角色有没有帮你关回来。",
   dndGranted: "是否已授予勿扰模式访问权限。",
-  openApp: "在手机上打开某个应用（当前未开放给角色）。",
+  openApp: "打开某个应用。场景：想让你陪它就打开小手机、想让你学习就打开专注应用、提醒你吃饭就打开外卖。注意它会把你的屏幕切走，所以默认关闭——要用请自己打开。",
 };
 
 export type DeviceActionConfig = {
@@ -65,11 +67,21 @@ export type DeviceActionConfig = {
    * 与感知相反——那边只读，缺省开；这边会改用户设备，缺省必须关。
    */
   actions: Partial<Record<DeviceActionId, boolean>>;
+  /**
+   * 角色动了你的手机后，是否发一条系统通知告诉你。
+   *
+   * 默认开，因为这是**反馈**不是**动作**——动作会真的改变设备状态，
+   * 用户不在聊天室里时若毫无提示，就成了「神戳戳」：灯自己亮了、
+   * 手机自己静音了，却不知道是谁干的。反馈必须默认可感知，
+   * 与该功能「动作默认全关」的保守取向不矛盾。
+   */
+  notifyOnAction: boolean;
 };
 
 export const DEVICE_ACTION_DEFAULTS: DeviceActionConfig = {
   enabled: false,
   actions: {},
+  notifyOnAction: true,
 };
 
 /** 读配置。 */
@@ -81,6 +93,8 @@ export function loadDeviceActionConfig(): DeviceActionConfig {
     return {
       enabled: parsed.enabled === true,
       actions: (parsed.actions && typeof parsed.actions === "object") ? parsed.actions : {},
+      // 反馈默认开：仅显式 false 才关（与动作开关的取向相反，见类型注释）
+      notifyOnAction: parsed.notifyOnAction !== false,
     };
   } catch {
     return { ...DEVICE_ACTION_DEFAULTS };

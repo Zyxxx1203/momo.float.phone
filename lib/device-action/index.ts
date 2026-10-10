@@ -5,3 +5,4 @@ export * from "./types";
 export * from "./bridge";
 export * from "./storage";
 export * from "./engine";
+export * from "./feedback";

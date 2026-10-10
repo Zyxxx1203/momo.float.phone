@@ -14,7 +14,9 @@
 // 所以每个失败分支都带一句人话原因，绝不静默吞掉。
 
 import {
+  findPackageByLabel,
   hasDeviceActionBridge,
+  openApp,
   readDeviceActionCapabilities,
   setBrightness,
   setDnd,
@@ -30,6 +32,12 @@ export type DeviceActionOutcome = {
   message?: string;
   /** 失败原因 */
   reason?: string;
+  /**
+   * 实际执行的动作 id（成功时才有）。
+   * 调用方据此挑反馈文案——用入参里的 action 字符串不安全：
+   * 模型可能拼错大小写或写中文，那样反馈会退化成「调整了你的设备」。
+   */
+  action?: string;
 };
 
 /** 动作是否可用（开关 + 壳支持）。设置面板用它显示三态。 */
@@ -116,7 +124,7 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       const on = args.on === true || args.on === "true" || args.on === 1;
       const result = setTorch(on);
       if (!result.ok) return { ok: false, reason: result.reason };
-      return { ok: true, message: on ? "手电筒已打开" : "手电筒已关闭" };
+      return { ok: true, action: "torch", message: on ? "手电筒已打开" : "手电筒已关闭" };
     }
 
     case "volume": {
@@ -130,7 +138,7 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       const pct = result.max && result.current !== undefined
         ? Math.round((result.current / result.max) * 100)
         : undefined;
-      return { ok: true, message: pct !== undefined ? `音量已调整（当前约 ${pct}%）` : "音量已调整" };
+      return { ok: true, action: "volume", message: pct !== undefined ? `音量已调整（当前约 ${pct}%）` : "音量已调整" };
     }
 
     case "brightness": {
@@ -143,7 +151,7 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
         // 需要授权时把原因说清楚，让角色能转告用户去开权限
         return { ok: false, reason: result.needPermission ? "还没有「修改系统设置」权限，需要 TA 去设置里授权" : result.reason };
       }
-      return { ok: true, message: `屏幕亮度已调到约 ${Math.round(level)}%` };
+      return { ok: true, action: "brightness", message: `屏幕亮度已调到约 ${Math.round(level)}%` };
     }
 
     case "dnd": {
@@ -154,15 +162,29 @@ export function runDeviceAction(args: Record<string, unknown>): DeviceActionOutc
       if (!result.ok) {
         return { ok: false, reason: result.needPermission ? "还没有「勿扰模式」访问权限，需要 TA 去设置里授权" : result.reason };
       }
-      return { ok: true, message: on ? "已打开勿扰模式" : "已关闭勿扰模式" };
+      return { ok: true, action: "dnd", message: on ? "已打开勿扰模式" : "已关闭勿扰模式" };
     }
 
-    // 「打开应用」刻意不对角色开放：角色打开别的 App 会把用户从小手机里踢出去，
-    // 与「沉浸聊天」这个核心体验直接冲突，而且想不出正当场景。
-    // 原生桥里保留了这个能力，将来若有明确用途（比如「帮我打开相机」）再开放，
-    // 现在返回一句明确的拒绝，避免模型反复尝试。
-    case "openApp":
-      return { ok: false, reason: "打开应用不对角色开放" };
+    // 「打开应用」：会把用户的屏幕切走，所以是这批动作里**侵略性最强**的一个，
+    // 默认关闭、需要用户主动开。但场景成立（陪它→打开小手机、
+    // 学习→专注应用、吃饭→外卖应用），所以开放而不是砍掉。
+    case "openApp": {
+      const blocked = allowed("openApp");
+      if (blocked) return blocked;
+      const raw = String(args.app ?? "").trim();
+      if (!raw) return { ok: false, reason: "缺少 app 参数（应用名或包名）" };
+      // 先当包名试，再当显示名找——角色多半只知道「微信」，不知道 com.tencent.mm
+      let pkg = raw;
+      let label = raw;
+      if (!raw.includes(".")) {
+        const found = findPackageByLabel(raw);
+        if (!found) return { ok: false, reason: `没找到叫「${raw}」的应用` };
+        pkg = found;
+      }
+      const result = openApp(pkg);
+      if (!result.ok) return { ok: false, reason: result.reason };
+      return { ok: true, action: "openApp", message: `已打开「${label}」` };
+    }
 
     default:
       return { ok: false, reason: `不认识的动作：${action}` };

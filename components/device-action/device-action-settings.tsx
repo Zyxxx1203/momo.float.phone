@@ -189,6 +189,26 @@ export function DeviceActionSettings({ onNotice }: { onNotice?: (msg: string) =>
           </div>
         </div>
 
+        {/* 反馈 */}
+        <div>
+          <div className="settings-menu-section-title">反馈</div>
+          <div className="menu-group" style={{ marginTop: 10 }}>
+            <div className="menu-item" style={{ cursor: "default" }}>
+              <div className="menu-label-group">
+                <span className="menu-label">动了我的手机就通知我</span>
+                <span className="menu-desc">
+                  角色调整你的设备后发一条系统通知，写明是谁、动了什么。
+                  默认开启——关掉的话，你就只能靠聊天里的记录发现了。
+                </span>
+              </div>
+              <Toggle
+                checked={config.notifyOnAction !== false}
+                onChange={(v: boolean) => update({ notifyOnAction: v })}
+              />
+            </div>
+          </div>
+        </div>
+
         {/* 能力实测 */}
         <div>
           <div className="settings-menu-section-title">本机实测</div>

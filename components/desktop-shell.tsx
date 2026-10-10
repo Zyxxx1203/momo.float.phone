@@ -4192,7 +4192,18 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       return <PhoneCalendarApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
     }
     if (activeApp === "realitybridge") {
-      return <RealityBridgeApp onClose={() => setActiveApp(null)} onNotice={setNotice} />;
+      return (
+        <RealityBridgeApp
+          onClose={() => setActiveApp(null)}
+          onNotice={setNotice}
+          onOpenSettings={(page) => {
+            // 复用设置页既有的深链机制（sessionStorage 标记），不新造一条跳转通道。
+            // 顺序要紧：先关掉当前 App，再开设置——否则设置页会被现实桥盖住。
+            sessionStorage.setItem("mascot-settings-mode", page);
+            setActiveApp("settings");
+          }}
+        />
+      );
     }
     if (activeApp === "qa") {
       return (

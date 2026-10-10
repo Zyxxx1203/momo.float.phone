@@ -19,6 +19,26 @@ export const REALITY_BRIDGE_CAPABILITY_ID = "reality_bridge_send";
 export const PERCEPTION_READ_CAPABILITY_ID = "perception_read";
 export const DEVICE_ACTION_CAPABILITY_ID = "device_action";
 
+/**
+ * 内置工具的保留名：用户给现实桥的快捷动作/数据项起名时必须避开。
+ *
+ * 为什么需要：现实桥的动作目录与内置工具共享同一个「角色可调用动作」命名空间。
+ * 撞名后行为不可预期（谁先匹配谁生效），而且用户很难自己看出问题。
+ * 宁可在他起名时就明确拦下，并告诉他哪个名字被占了。
+ *
+ * **新增内置工具时，记得把名字加到这里。**
+ */
+export const RESERVED_INTERNAL_TOOL_NAMES: string[] = [
+    "查看TA的手机",
+    "操作TA的设备",
+    "写入记忆",
+    "发送文件",
+    "角色电脑",
+    "稍后主动联系",
+    "设置定时醒来",
+    "查看全部手机数据",
+];
+
 export type InternalToolDefinition = {
     name: string;
     description: string;

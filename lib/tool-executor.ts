@@ -800,9 +800,13 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     if (isToolboxManagementToolName(call.name)) return executeToolboxManagementTool(call);
     if (call.name === "发送文件") return executeSendFileTool(call);
     if (call.name === "角色电脑") return executeAgentComputerTool(call, context);
-    if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
+    // 内置工具必须排在用户自定义的现实桥动作**之前**：
+    // 用户完全可能把快捷动作也命名成「查看TA的手机」，若让现实桥先匹配，
+    // 内置工具就永远调不到（被同名的用户动作影子覆盖），而且表现是
+    // 「调了但行为不对」——极难排查。宁可让用户起名时就被拦住（见现实桥的保留名校验）。
     if (call.name === "查看TA的手机") return executePerceptionReadTool(call, context);
     if (call.name === "操作TA的设备") return executeDeviceActionTool(call, context);
+    if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
     if (call.name !== "写入记忆") return null;

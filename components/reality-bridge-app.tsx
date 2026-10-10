@@ -37,6 +37,9 @@ import {
   personalPushFetch,
 } from "@/lib/personal-push-cloud";
 import { isValidShortcutEmailAddress, shortcutEmailSubjectTag } from "@/lib/shortcut-email";
+import { readPerceptionDiagnostics } from "@/lib/perception";
+import { RESERVED_INTERNAL_TOOL_NAMES } from "@/lib/internal-capability-storage";
+import { loadDeviceActionConfig, TOGGLEABLE_ACTIONS, hasDeviceActionBridge } from "@/lib/device-action";
 
 type TabId = "main" | "history";
 
@@ -217,9 +220,15 @@ function ruleIcon(rule: BridgeRule) {
   return RB_ICON_INBOX;
 }
 
-export function RealityBridgeApp({ onClose, onNotice }: {
+export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
   onClose: () => void;
   onNotice?: (text: string) => void;
+  /**
+   * 打开设置里的某个子页。安卓桥分区的详细开关都住在设置里，
+   * 这里只给一个「去设置 →」的跳板——同一份配置只维护一处，
+   * 不在这页重复造开关（造了就会两边不一致）。
+   */
+  onOpenSettings?: (page: "perception" | "deviceAction") => void;
 }) {
   const [tab, setTab] = useState<TabId>("main");
   const [settings, setSettings] = useState(() => loadBridgeSettings());
@@ -245,7 +254,14 @@ export function RealityBridgeApp({ onClose, onNotice }: {
   const [bridgeToken, setBridgeToken] = useState("");
   const [closing, setClosing] = useState(false);
   const [spinTurns, setSpinTurns] = useState(0);
-  const [mainSec, setMainSec] = useState<"rules" | "shortcuts" | "queries" | "screen">("rules");
+  const [mainSec, setMainSec] = useState<"android" | "rules" | "shortcuts" | "queries" | "screen">("android");
+  // 安卓桥分区的只读快照。这里刻意不订阅变化事件：这页只是总览，
+  // 用户改完设置回来时组件会重新挂载，读到的自然是最新值。
+  const perceptionDiag = useMemo(() => readPerceptionDiagnostics(), []);
+  const deviceActionCfg = useMemo(() => loadDeviceActionConfig(), []);
+  const deviceActionBridgeOk = useMemo(() => hasDeviceActionBridge(), []);
+  const deviceActionEnabled = deviceActionCfg.enabled;
+  const deviceActionOnCount = TOGGLEABLE_ACTIONS.filter(id => deviceActionCfg.actions[id] === true).length;
   const [screenChat, setScreenChat] = useState<ScreenChatSettings>(() => loadScreenChatSettings());
   const [editingScreenChat, setEditingScreenChat] = useState<ScreenChatSettings | null>(null);
   const [histSec, setHistSec] = useState<"feed" | "commands">("feed");
@@ -511,6 +527,10 @@ export function RealityBridgeApp({ onClose, onNotice }: {
       onNotice?.("名称和标识都需要填写");
       return;
     }
+    if (RESERVED_INTERNAL_TOOL_NAMES.includes(name)) {
+      onNotice?.(`「${name}」是内置工具的名字，请换一个`);
+      return;
+    }
     if (dataItems.some(item => item.id !== editingItem.id && (item.name === name || item.key === key))) {
       onNotice?.("名称或标识与已有数据项重复");
       return;
@@ -540,9 +560,11 @@ export function RealityBridgeApp({ onClose, onNotice }: {
       onNotice?.("参数定义过长");
       return;
     }
-    const reservedNames = new Set(["查看全部手机数据", ...dataItems.map(item => item.name)]);
+    // 保留名同时包含内置工具（否则与「查看TA的手机」等撞名后，
+    // 内置工具会被影子覆盖）与本页已有数据项。
+    const reservedNames = new Set([...RESERVED_INTERNAL_TOOL_NAMES, ...dataItems.map(item => item.name)]);
     if (reservedNames.has(name)) {
-      onNotice?.("工具名称与现实桥已有动作重复");
+      onNotice?.(`「${name}」是内置工具的名字，请换一个`);
       return;
     }
     if (shortcutActions.some(item => item.id !== editingShortcut.id && item.name === name)) {
@@ -905,13 +927,14 @@ export function RealityBridgeApp({ onClose, onNotice }: {
           {tab === "main" ? (
             <section>
               <div className="rb-hello">
-                <h3>iOS现实桥</h3>
+                <h3>现实桥</h3>
                 <button
                   type="button"
                   className="rb-add"
-                  disabled={mainSec === "screen" && Boolean(screenChat.characterId)}
-                  aria-label={mainSec === "rules" ? "新建联动" : mainSec === "shortcuts" ? "新建快捷动作" : mainSec === "queries" ? "新建数据项" : screenChat.characterId ? "屏幕速聊已配置" : "配置屏幕速聊"}
+                  disabled={mainSec === "android" || (mainSec === "screen" && Boolean(screenChat.characterId))}
+                  aria-label={mainSec === "android" ? "本机能力在设置里配置" : mainSec === "rules" ? "新建联动" : mainSec === "shortcuts" ? "新建快捷动作" : mainSec === "queries" ? "新建数据项" : screenChat.characterId ? "屏幕速聊已配置" : "配置屏幕速聊"}
                   onClick={() => {
+                    if (mainSec === "android") return;
                     if (mainSec === "rules") openRuleEditor(newRule(), false);
                     else if (mainSec === "shortcuts") openShortcutEditor(newShortcutAction(), false);
                     else if (mainSec === "queries") openDataItemEditor(newDataItem(), false);
@@ -986,12 +1009,74 @@ export function RealityBridgeApp({ onClose, onNotice }: {
               <>
                   <div className="rb-chipbar">
                     <div className="rb-chips">
+                      <button type="button" className={`rb-chip${mainSec === "android" ? " active" : ""}`} onClick={() => setMainSec("android")}>本机安卓桥</button>
                       <button type="button" className={`rb-chip${mainSec === "rules" ? " active" : ""}`} onClick={() => setMainSec("rules")}>自动联动</button>
                       <button type="button" className={`rb-chip${mainSec === "shortcuts" ? " active" : ""}`} onClick={() => setMainSec("shortcuts")}>快捷动作</button>
                       <button type="button" className={`rb-chip${mainSec === "queries" ? " active" : ""}`} onClick={() => setMainSec("queries")}>主动查询</button>
                       <button type="button" className={`rb-chip${mainSec === "screen" ? " active" : ""}`} onClick={() => setMainSec("screen")}>屏幕速聊</button>
                     </div>
                   </div>
+
+                  {/* ── 本机安卓桥 ──
+                      与上面的 iPhone 快捷指令路线并列的第二条信号源：
+                      安卓壳能**直接**读到手机状态（不经云端、不出设备），也能直接做事。
+                      这里只做「总览 + 引导」——详细开关分别在
+                      「设置 → 感知」和「设置 → 操作设备」里，避免同一份配置两处维护。 */}
+                  {mainSec === "android" ? (
+                    <>
+                      <div className="rb-hint" style={{ padding: "8px 4px 0" }}>
+                        你的安卓小手机自带一套原生能力，不需要快捷指令、不经过云端、数据不出本机。
+                        下面每一项都是「先读状态 / 再动手」的组合，开关在设置里，这里只负责让你看清现状。
+                      </div>
+
+                      <div className="rb-grid" style={{ marginTop: 10 }}>
+                        <div className="rb-rcard" onClick={() => { setMenuOpen(false); onOpenSettings?.("perception"); }}>
+                          <div className="rb-rtop">
+                            <span className="rb-icchip">{RB_ICON_PHONE}</span>
+                            <span className="rb-type">{perceptionDiag.bridgeAvailable ? "已接通" : "需更新壳"}</span>
+                          </div>
+                          <b>感知 · 角色能看见什么</b>
+                          <p className="rb-rsum">
+                            {perceptionDiag.running ? "引擎运行中" : "引擎已停止"}
+                            {" · "}
+                            {perceptionDiag.accessibility ? "无障碍已开" : "无障碍未开"}
+                            {" · 本小时 "}{perceptionDiag.hourlyUsed}/{perceptionDiag.hourlyLimit}{" 条信号"}
+                          </p>
+                          <div className="rb-rfoot">
+                            <span className="rb-rstate">电量 / 网络 / 前台应用 / 步数 / 回到手机</span>
+                            <span className="rb-link">去设置 →</span>
+                          </div>
+                        </div>
+
+                        <div className="rb-rcard" onClick={() => { setMenuOpen(false); onOpenSettings?.("deviceAction"); }}>
+                          <div className="rb-rtop">
+                            <span className="rb-icchip">{RB_ICON_GEAR}</span>
+                            <span className="rb-type">{deviceActionBridgeOk ? "已接通" : "需更新壳"}</span>
+                          </div>
+                          <b>操作设备 · 角色能做什么</b>
+                          <p className="rb-rsum">
+                            {deviceActionEnabled
+                              ? `${deviceActionOnCount}/${TOGGLEABLE_ACTIONS.length} 个动作已开启`
+                              : "总开关已关闭，角色动不了你的设备"}
+                          </p>
+                          <div className="rb-rfoot">
+                            <span className="rb-rstate">手电筒 / 音量 / 亮度 / 勿扰 / 打开应用</span>
+                            <span className="rb-link">去设置 →</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rb-hint" style={{ padding: "12px 4px 0" }}>
+                        这两项都默认保守：感知只读取（默认开），操作设备会真的改你的手机（默认全关，要逐个打开）。
+                        角色调用它们时，聊天里会留下记录；你不在聊天室时会收到系统通知。
+                      </div>
+
+                      <div className="rb-hint" style={{ padding: "12px 4px 0" }}>
+                        想让角色在<b>离线时</b>也能知道你的状态？去「设置 → 感知」打开「同步状态到我的云端」。
+                      </div>
+                    </>
+                  ) : null}
+
                   {mainSec === "rules" ? (rules.length === 0 ? (
                     <div className="rb-empty">
                       <b>还没有联动</b>

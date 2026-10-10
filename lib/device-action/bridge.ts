@@ -21,7 +21,7 @@ type DeviceActionBridgeLike = {
   setAlarm?: (hour: number, minute: number, message: string) => string;
   setTimer?: (seconds: number, message: string) => string;
   mediaControl?: (action: string) => string;
-  openUrl?: (url: string) => string;
+  openWebUrl?: (url: string) => string;
   hasUsageStatsAccess?: () => boolean;
   getDeviceActionCapabilities?: () => string;
   openSystemSettings?: (which: string) => boolean;
@@ -162,7 +162,7 @@ export function mediaControl(action: string): DeviceActionResult {
 /** 用系统浏览器打开链接（只放行 http/https）。 */
 export function openUrl(url: string): DeviceActionResult {
   try {
-    const raw = bridge()?.openUrl?.(url);
+    const raw = bridge()?.openWebUrl?.(url);
     if (raw === undefined) return { ok: false, reason: "当前 App 版本不支持打开网页" };
     return parseResult(raw, "链接未能打开");
   } catch {

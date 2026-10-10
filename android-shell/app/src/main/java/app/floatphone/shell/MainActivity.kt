@@ -606,9 +606,15 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun mediaControl(action: String): String = deviceAction.mediaControl(action).toString()
 
-        /** 用系统浏览器打开链接（只放行 http/https）。 */
+        /**
+         * 用系统浏览器打开链接（只放行 http/https）。
+         *
+         * 方法名刻意不叫 openUrl：下方跨 App 跳转的 openUrl(url): Boolean 是既有接口。
+         * 同一个 ShellBridge 里两个 openUrl 方法名与参数类型相同、仅返回类型不同，
+         * 会构成 JVM 平台声明冲突，导致整包编译失败——这里用独立名字把两者分开。
+         */
         @JavascriptInterface
-        fun openUrl(url: String): String = deviceAction.openUrl(url).toString()
+        fun openWebUrl(url: String): String = deviceAction.openUrl(url).toString()
 
         /** 是否已授予「使用情况访问」权限（屏幕使用时间的前提）。 */
         @JavascriptInterface

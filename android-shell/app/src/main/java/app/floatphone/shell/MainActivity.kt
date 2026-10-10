@@ -84,6 +84,9 @@ class MainActivity : AppCompatActivity() {
     /** 感知桥：把电量/网络/应用名/步数交给网页（边界说明见 PerceptionBridge）。 */
     private val perception by lazy { PerceptionBridge(this) }
 
+    /** 设备动作桥：让网页（进而让角色）在真实手机上做一件小事（边界说明见 DeviceActionBridge）。 */
+    private val deviceAction by lazy { DeviceActionBridge(this) }
+
     /**
      * 活动识别权限的申请结果回调。
      *
@@ -536,6 +539,53 @@ class MainActivity : AppCompatActivity() {
             runCatching { stepPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION) }
             return false
         }
+
+        // ── 设备动作桥（手电筒 / 音量 / 亮度 / 勿扰 / 打开应用）────
+        // 全部返回 JSON 字符串（{"ok":true,...} 或 {"ok":false,"reason":"..."}）：
+        // @JavascriptInterface 对复杂返回类型的支持有限，返回字符串最稳，
+        // 也让网页侧能拿到「为什么失败」而不是一个光秃秃的 false。
+        //
+        // 每个动作都是一次性、立即可见、可撤销的；不做任何持续/隐蔽行为。
+
+        /** 手电筒：开关。 */
+        @JavascriptInterface
+        fun setTorch(on: Boolean): String = deviceAction.setTorch(on).toString()
+
+        /** 手电筒当前状态（本进程内的记忆，见 DeviceActionBridge）。 */
+        @JavascriptInterface
+        fun isTorchOn(): Boolean = deviceAction.isTorchOn()
+
+        /** 音量：stream=media/ring/alarm/notification，action=up/down/set/mute，level=0-100。 */
+        @JavascriptInterface
+        fun setVolume(stream: String, action: String, level: Int): String =
+            deviceAction.setVolume(stream, action, level).toString()
+
+        /** 屏幕亮度：level=0-100（需要「修改系统设置」权限）。 */
+        @JavascriptInterface
+        fun setBrightness(level: Int): String = deviceAction.setBrightness(level).toString()
+
+        /** 勿扰模式开关（需要勿扰访问权限）。 */
+        @JavascriptInterface
+        fun setDnd(on: Boolean): String = deviceAction.setDnd(on).toString()
+
+        /** 按包名打开另一个应用。 */
+        @JavascriptInterface
+        fun openApp(packageName: String): String = deviceAction.openApp(packageName).toString()
+
+        /** 按应用显示名找包名（找不到返回空串）。 */
+        @JavascriptInterface
+        fun findPackageByLabel(label: String): String = deviceAction.findPackageByLabel(label)
+
+        /** 本机支持哪些设备动作（含授权状态）。 */
+        @JavascriptInterface
+        fun getDeviceActionCapabilities(): String = deviceAction.capabilitiesJson()
+
+        /**
+         * 跳系统授权页。which = write_settings / dnd / accessibility / battery / app_details。
+         * 由网页在用户点「去授权」时调用，壳不主动跳。
+         */
+        @JavascriptInterface
+        fun openSystemSettings(which: String): Boolean = deviceAction.openSystemSettings(which)
 
         /**
          * 让网页直接发一条真正的系统通知（网页侧封装在 lib/shell-notify.ts）。

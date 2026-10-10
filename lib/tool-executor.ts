@@ -23,7 +23,7 @@ import {
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, DEVICE_ACTION_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
 import {
     checkQueryCooldown,
     describeStatusByFocus,
@@ -33,6 +33,7 @@ import {
     loadPerceptionStatus,
     markQueryPerformed,
 } from "./perception";
+import { runDeviceAction } from "./device-action";
 import { bridgeConnection, loadBridgeDataItems, loadBridgeShortcutActions, readAllBridgeStateSnapshots, readBridgeStateSnapshot } from "./reality-bridge/storage";
 import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
@@ -801,6 +802,7 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     if (call.name === "角色电脑") return executeAgentComputerTool(call, context);
     if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
     if (call.name === "查看TA的手机") return executePerceptionReadTool(call, context);
+    if (call.name === "操作TA的设备") return executeDeviceActionTool(call);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
     if (call.name !== "写入记忆") return null;
@@ -870,6 +872,46 @@ async function executePerceptionReadTool(call: ToolCall, context?: ToolExecution
     }
     markQueryPerformed(characterId);
     return { name: call.name, success: true, data: text, userNotice: "看了看你的手机" };
+}
+
+/**
+ * 角色操作真实设备（手电筒 / 音量 / 亮度 / 勿扰 / 打开应用）。
+ *
+ * 与感知读取相反：这个**会真的改变用户手机状态**，所以：
+ *  - 每个动作都要过逐动作开关（用户在设置里能单独关掉不想要的）；
+ *  - 失败必须把原因如实交回给角色，让它转述，而不是笼统报「执行失败」；
+ *  - 成功也回一句人话，角色才知道到底做了什么（亮度调到几、音量现在多大）。
+ */
+async function executeDeviceActionTool(call: ToolCall): Promise<ToolResult> {
+    const capability = getInternalCapability(DEVICE_ACTION_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return {
+            name: call.name,
+            success: false,
+            error: "「操作TA的设备」能力未启用（工具箱 → 内置能力）",
+            continueConversation: false,
+            persistToHistory: false,
+            userNotice: "操作TA的设备能力未启用",
+        };
+    }
+
+    const outcome = runDeviceAction(call.args || {});
+    if (!outcome.ok) {
+        // 失败也 persistToHistory=false：不让一条失败的尝试留在历史里
+        // 诱导模型下一轮继续纠结同一个动作。
+        return {
+            name: call.name,
+            success: false,
+            error: outcome.reason || "设备动作执行失败",
+            userNotice: outcome.reason || "设备动作执行失败",
+        };
+    }
+    return {
+        name: call.name,
+        success: true,
+        data: outcome.message || "已执行",
+        userNotice: outcome.message || "已执行",
+    };
 }
 
 function isRealityBridgeToolName(name: string): boolean {

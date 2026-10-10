@@ -17,6 +17,7 @@ export const TOOLBOX_MANAGEMENT_CAPABILITY_ID = "toolbox_management";
 export const TIMED_WAKE_CAPABILITY_ID = "timed_wake";
 export const REALITY_BRIDGE_CAPABILITY_ID = "reality_bridge_send";
 export const PERCEPTION_READ_CAPABILITY_ID = "perception_read";
+export const DEVICE_ACTION_CAPABILITY_ID = "device_action";
 
 export type InternalToolDefinition = {
     name: string;
@@ -1199,6 +1200,15 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
         updatedAt: 0,
     },
     {
+        id: DEVICE_ACTION_CAPABILITY_ID,
+        name: "操作TA的设备",
+        description: "在{{user}}的真实手机上做一件小事：开关手电筒、调音量、调屏幕亮度、开关勿扰。会真的生效且改动是持久的，所以要想清楚再用。",
+        enabled: false,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
         id: MEMORY_WRITE_CAPABILITY_ID,
         name: "写入记忆",
         description: "将明确、稳定、长期有价值的信息写入长期记忆。仅限关系里程碑、长期偏好、身份信息、重要约定；禁止写入短期情绪、普通寒暄、猜测或未确认内容。",
@@ -1400,8 +1410,74 @@ export function getInternalCapabilityToolDefinition(capability: InternalCapabili
             usageGuide: PERCEPTION_READ_USAGE_GUIDE,
         };
     }
+    if (capability.id === DEVICE_ACTION_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: DEVICE_ACTION_PARAMETER_SCHEMA,
+            usageGuide: DEVICE_ACTION_USAGE_GUIDE,
+        };
+    }
     return null;
 }
+
+/* ---------- 设备动作：让角色在真实手机上做一件小事 ---------- */
+
+const DEVICE_ACTION_PARAMETER_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        action: {
+            type: "string",
+            description: "要做什么：torch=手电筒开关，volume=调音量，brightness=调屏幕亮度，dnd=勿扰模式开关。",
+        },
+        on: {
+            type: "boolean",
+            description: "action=torch/dnd 时用：true 开，false 关。",
+        },
+        level: {
+            type: "number",
+            description: "action=brightness 时用：屏幕亮度百分比 1-100；action=volume 且 mode=set 时用：音量百分比 0-100。",
+        },
+        stream: {
+            type: "string",
+            description: "action=volume 时用：media=媒体，ring=铃声，alarm=闹钟，notification=通知。默认 media。",
+        },
+        mode: {
+            type: "string",
+            description: "action=volume 时用：up=调高，down=调低，set=设为指定值，mute=静音。默认 up。",
+        },
+
+    },
+    required: ["action"],
+});
+
+const DEVICE_ACTION_USAGE_GUIDE = [
+    "以下是你获取指令的返回结果：",
+    "动作：操作TA的设备",
+    "用途：在{{user}}的真实手机上做一件小事——开手电筒、调音量、调亮度、开勿扰。",
+    "",
+    "【重要边界】",
+    "- 这些动作**会真的在 TA 手机上生效**，对方立刻能看到/听到。不是聊天里的模拟。",
+    "- 只在确实有用时才做，并且做完要自然说一句你做了什么。别为了刷存在感乱动。",
+    "- 深夜开灯、突然静音这类动作可能吓到人或影响睡觉，动手前想清楚。",
+    "- 你**做不到**：发短信、打电话、读通讯录、删东西、装应用、改别人 App 里的内容。",
+    "",
+    "各动作的参数：",
+    "动作：操作TA的设备",
+    "- action (string, 必填): torch / volume / brightness / dnd",
+    "- on (boolean): action=torch/dnd 时用，true 开 false 关",
+    "- level (number): action=brightness 时用 1-100；action=volume 且 mode=set 时用 0-100",
+    "- stream (string): action=volume 时用 media/ring/alarm/notification，默认 media",
+    "- mode (string): action=volume 时用 up/down/set/mute，默认 up",
+    "",
+    "示例：",
+    '[执行动作:操作TA的设备({"action":"torch","on":true})]',
+    '[执行动作:操作TA的设备({"action":"volume","mode":"down"})]',
+    '[执行动作:操作TA的设备({"action":"brightness","level":30})]',
+    '[执行动作:操作TA的设备({"action":"dnd","on":true})]',
+    "",
+    "如果失败，结果里会说明原因（比如没有权限、设备没有闪光灯）。**如实转述原因，不要假装成功**；需要授权的，可以提醒 TA 去设置里打开。",
+].join("\n");
 
 /* ---------- 感知读取：让角色主动看一眼真实手机 ---------- */
 

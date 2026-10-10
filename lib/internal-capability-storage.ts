@@ -16,6 +16,7 @@ export const LOCAL_DATA_LIBRARY_CAPABILITY_ID = "local_data_library";
 export const TOOLBOX_MANAGEMENT_CAPABILITY_ID = "toolbox_management";
 export const TIMED_WAKE_CAPABILITY_ID = "timed_wake";
 export const REALITY_BRIDGE_CAPABILITY_ID = "reality_bridge_send";
+export const PERCEPTION_READ_CAPABILITY_ID = "perception_read";
 
 export type InternalToolDefinition = {
     name: string;
@@ -1189,6 +1190,15 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
         updatedAt: 0,
     },
     {
+        id: PERCEPTION_READ_CAPABILITY_ID,
+        name: "查看TA的手机",
+        description: "看一眼{{user}}此刻真实手机的状态（电量、网络、正在用的应用、步数）。只读，不会改变任何东西。",
+        enabled: false,
+        mode: "auto",
+        createdAt: 0,
+        updatedAt: 0,
+    },
+    {
         id: MEMORY_WRITE_CAPABILITY_ID,
         name: "写入记忆",
         description: "将明确、稳定、长期有价值的信息写入长期记忆。仅限关系里程碑、长期偏好、身份信息、重要约定；禁止写入短期情绪、普通寒暄、猜测或未确认内容。",
@@ -1382,8 +1392,48 @@ export function getInternalCapabilityToolDefinition(capability: InternalCapabili
             usageGuide: buildRealityBridgeUsageGuide(),
         };
     }
+    if (capability.id === PERCEPTION_READ_CAPABILITY_ID) {
+        return {
+            name: capability.name,
+            description: capability.description,
+            parameterSchema: PERCEPTION_READ_PARAMETER_SCHEMA,
+            usageGuide: PERCEPTION_READ_USAGE_GUIDE,
+        };
+    }
     return null;
 }
+
+/* ---------- 感知读取：让角色主动看一眼真实手机 ---------- */
+
+const PERCEPTION_READ_PARAMETER_SCHEMA = JSON.stringify({
+    type: "object",
+    properties: {
+        focus: {
+            type: "string",
+            description: "可选，只看某一类：battery=电量与充电，network=网络，app=正在用什么应用，steps=步数。不填返回全部。",
+        },
+    },
+});
+
+const PERCEPTION_READ_USAGE_GUIDE = [
+    "以下是你获取指令的返回结果：",
+    "动作：查看TA的手机",
+    "用途：看一眼{{user}}此刻真实手机的状态——电量、网络、正在用什么应用、走了多少步。",
+    "",
+    "什么时候用：",
+    "- 你确实好奇 TA 在干什么、是不是还没睡、是不是出门了；",
+    "- 对话里需要一个依据时（比如已经很晚了，你想确认 TA 还在不在）。",
+    "不要每次聊天都查。查到的东西也不要点名逐项念出来——像顺手瞥了一眼那样自然地带一句就好。",
+    "",
+    "参数：",
+    "- focus (string, 可选): 只看某一类；battery=电量与充电，network=网络，app=正在用什么应用，steps=步数。不填返回全部。",
+    "",
+    "示例：",
+    "[执行动作:查看TA的手机({})]",
+    '[执行动作:查看TA的手机({"focus":"battery"})]',
+    "",
+    "这是只读动作，不会改变 TA 手机上的任何东西。如果某项读不到，说明缺少对应权限或壳版本过低，不要编造。",
+].join("\n");
 
 /* ---------- 现实桥套装：固定子工具 + 用户自定义数据项动态生成 ---------- */
 

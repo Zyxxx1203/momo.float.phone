@@ -6,7 +6,7 @@
 import { isWithinPushQuietHours } from "../push-client";
 import { hasPerceptionBridge, readNativeCapabilities } from "./bridge";
 import { isPerceptionRunning } from "./engine";
-import { isCapabilityEnabled, loadPerceptionConfig, loadPerceptionState } from "./storage";
+import { isCapabilityEnabled, loadPerceptionConfig, loadPerceptionState, loadPerceptionStatus } from "./storage";
 import {
   PERCEPTION_CAPABILITY_DESC,
   PERCEPTION_CAPABILITY_LABEL,
@@ -37,6 +37,7 @@ export function readPerceptionDiagnostics(): PerceptionDiagnostics {
     accessibility,
     lastSampleAt: state.lastSampleAt,
     lastSnapshot: state.lastSnapshot,
+    status: loadPerceptionStatus(),
     hourlyUsed: windowFresh ? state.hourCount : 0,
     hourlyLimit: config.hourlyLimit,
     unmatchedSignals: state.unmatchedSignals,
@@ -76,15 +77,21 @@ export function buildCapabilityRows(): CapabilityRow[] {
   }
 
   const ids: PerceptionCapability[] = [
-    "battery", "network", "foregroundApp", "location", "calendar", "contacts", "usageStats",
+    "battery", "network", "foregroundApp", "steps", "location", "calendar", "contacts", "usageStats", "returnToPhone",
   ];
 
   return ids.map(id => {
     const userEnabled = isCapabilityEnabled(config, id);
-    const nativeSupported = native[id] === true;
+    // 「回到手机」是纯网页实现（前后台切换 + 计时），不依赖原生桥，恒为支持。
+    // 不特殊处理的话，非壳环境/老 APK 下会被 native[id]===true 判成「不支持」，
+    // 而它其实能用——比不显示更让人迷惑。
+    const nativeSupported = id === "returnToPhone" ? true : native[id] === true;
     let missingRequirement = "";
     if (id === "foregroundApp" && nativeSupported && !accessibility) {
       missingRequirement = "需要开启无障碍服务";
+    }
+    if (id === "steps" && !nativeSupported) {
+      missingRequirement = "需要重编 APK（当前壳版本未提供步数）";
     }
     return {
       id,

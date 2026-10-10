@@ -23,12 +23,15 @@ import { processBridgeItem } from "../reality-bridge/engine";
 import type { BridgeItem } from "../reality-bridge/types";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
 import { hasPerceptionBridge, readAppLabel, readPerceptionSnapshot } from "./bridge";
+import { syncPerceptionToCloud } from "./cloud-sync";
 import {
   appendPerceptionLog,
   isCapabilityEnabled,
   loadPerceptionConfig,
   loadPerceptionState,
+  loadPerceptionStatus,
   savePerceptionState,
+  savePerceptionStatus,
   type PerceptionRuntimeState,
 } from "./storage";
 import type { PerceptionCapability, PerceptionSignal } from "./types";
@@ -37,6 +40,7 @@ const HOUR_MS = 60 * 60 * 1000;
 
 let timer: number | null = null;
 let unsubscribeForeground: (() => void) | null = null;
+let unsubscribeVisibility: (() => void) | null = null;
 let running = false;
 
 /** 引擎是否在运行（诊断面板读） */
@@ -159,7 +163,8 @@ async function sampleOnce(): Promise<void> {
       if (drop >= config.batteryStepPercent) {
         await emitSignal({
           capability: "battery",
-          type: percent <= 20 ? "电量偏低" : "电量变化",
+          // 阈值来自配置（默认 20），不再是硬编码——用户想改成 30% 提前提醒不用重编 APK
+          type: percent <= config.batteryLowPercent ? "电量偏低" : "电量变化",
           payload: `${percent}%`,
         }, state);
       }
@@ -184,6 +189,32 @@ async function sampleOnce(): Promise<void> {
   // 事件只更新「当前在用哪个应用」，真正的判断放在采样里：
   // 因为用户可能一直停在同一个应用、不再产生新事件，靠事件驱动会永远等不到。
   await checkDwell(config.appDwellMinutes, state);
+
+  // ── 设备状态缓存 ──
+  // 供三处读取：聊天时的按需注入、角色主动调用「查看TA的手机」、云端同步。
+  // 存在这里而不是各消费方自己去原生取，是为了让它们读到同一份「此刻一致」的状态，
+  // 也避免每个功能各写一遍降级逻辑。
+  const dwellLabel = state.dwellPackage
+    ? (readAppLabel(state.dwellPackage) || state.dwellPackage)
+    : "";
+  savePerceptionStatus({
+    at: new Date().toISOString(),
+    batteryPercent: percent,
+    charging,
+    networkType: netType || "",
+    metered: snapshot.network.metered,
+    foregroundApp: dwellLabel,
+    foregroundMinutes: state.dwellSince > 0
+      ? Math.max(0, Math.floor((Date.now() - state.dwellSince) / 60000))
+      : 0,
+    steps: snapshot.steps,
+  });
+
+  // ── 云端同步（默认关）──
+  // 必须排在状态缓存**之后**：它上传的就是这份刚写好的成品。
+  // 放前面会推上一轮的旧值（差一个采样周期）。
+  // 用 void 不 await：上传可能耗时，不能让采样循环等它。
+  void syncPerceptionToCloud();
 
   savePerceptionState(state);
 }
@@ -218,6 +249,111 @@ function onForegroundApp(pkg: string): void {
   savePerceptionState(state);
 }
 
+// ── 回到手机（回归信号）──
+//
+// 需求：用户离开小手机一段时间再回来，角色应该能察觉到「TA 回来了」。
+// 这是纯网页实现（visibilitychange + 计时），不需要任何原生权限，
+// 因此普通浏览器、老 APK 上一样能用。
+//
+// 两道闸，缺一不可：
+//   ① 离开够久（returnAwayMinutes）：切一下微信回来不算「离开」。
+//   ② 回归信号本身有冷却（returnCooldownMinutes）：反复切前后台不刷屏。
+// 最终是否打扰由现实桥规则决定（要不要写进聊天、要不要让角色回应）。
+
+/** 记录「离开小手机」的时刻。重复调用只取最早一次。 */
+export function markAwayFromPhone(): void {
+  if (typeof window === "undefined") return;
+  const state = loadPerceptionState();
+  if (state.awaySince > 0) return;
+  state.awaySince = Date.now();
+  savePerceptionState(state);
+}
+
+/**
+ * 处理「回到小手机」。
+ *
+ * @returns 产生的信号类型；没达到阈值或冷却中时为 null。
+ */
+export async function markReturnedToPhone(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  const config = loadPerceptionConfig();
+  const state = loadPerceptionState();
+
+  const awaySince = state.awaySince;
+  // 归位：不管这次算不算「离开过」，都要清掉离开标记，否则下次判断拿的是旧时间
+  state.awaySince = 0;
+
+  if (!config.enabled || !config.returnSignalEnabled) {
+    savePerceptionState(state);
+    return null;
+  }
+  if (!isCapabilityEnabled(config, "returnToPhone")) {
+    savePerceptionState(state);
+    return null;
+  }
+  if (awaySince <= 0) {
+    savePerceptionState(state);
+    return null;
+  }
+
+  const awayMinutes = Math.floor((Date.now() - awaySince) / 60000);
+  if (awayMinutes < config.returnAwayMinutes) {
+    savePerceptionState(state);
+    return null;
+  }
+
+  // 冷却：用独立的 lastReturnSignalAt 而不是现实桥规则的 cooldownMinutes。
+  // 规则冷却拦下时信号已经被 markBridgeRuleRun 记过时间，且流水里只留一句「只存档」，
+  // 用户看不出是「太频繁」还是「没配规则」；在这里拦，诊断面板能明确写原因。
+  const cooldownMs = config.returnCooldownMinutes * 60000;
+  if (cooldownMs > 0 && Date.now() - state.lastReturnSignalAt < cooldownMs) {
+    savePerceptionState(state);
+    return null;
+  }
+
+  const type = "回到手机";
+  const delivered = await emitSignal({
+    capability: "returnToPhone",
+    type,
+    payload: `离开了 ${awayMinutes} 分钟`,
+  }, state);
+  // 只有真投递出去才记冷却。被开关/安静时段/限流拦下时保持原值，
+  // 下次回来还能补上——与停留上报同一套「被拦下不算发生过」的约定。
+  if (delivered) state.lastReturnSignalAt = Date.now();
+  savePerceptionState(state);
+  return delivered ? type : null;
+}
+
+// ── 查询冷却 ──
+
+/**
+ * 角色调用「查看TA的手机」前的冷却检查。
+ *
+ * 同一角色在 queryCooldownMinutes 内重复查询会被拦下（返回剩余秒数），
+ * 避免角色一句话里连查三次、既费 token 又显得神经质。
+ * 冷却为 0 时视为不限制。
+ */
+export function checkQueryCooldown(characterId: string): { allowed: boolean; remainingSeconds: number } {
+  const config = loadPerceptionConfig();
+  if (config.queryCooldownMinutes <= 0) return { allowed: true, remainingSeconds: 0 };
+  const state = loadPerceptionState();
+  const last = state.lastQueryAt?.[characterId] ?? 0;
+  const elapsed = Date.now() - last;
+  const limitMs = config.queryCooldownMinutes * 60000;
+  if (last > 0 && elapsed < limitMs) {
+    return { allowed: false, remainingSeconds: Math.ceil((limitMs - elapsed) / 1000) };
+  }
+  return { allowed: true, remainingSeconds: 0 };
+}
+
+/** 记录某角色刚查询过（查询成功投递后调用）。 */
+export function markQueryPerformed(characterId: string): void {
+  if (!characterId) return;
+  const state = loadPerceptionState();
+  state.lastQueryAt = { ...(state.lastQueryAt ?? {}), [characterId]: Date.now() };
+  savePerceptionState(state);
+}
+
 // ── 生命周期 ──
 
 /** 启动引擎。幂等：重复调用不会起第二个定时器。 */
@@ -233,6 +369,15 @@ export async function startPerception(): Promise<void> {
     if (event.action === "foregroundApp" && event.package) onForegroundApp(event.package);
   });
 
+  // 前后台切换 → 「回到手机」信号。与页面可见性绑定而非 focus 事件：
+  // 在安卓 WebView 里切走/切回只稳定触发 visibilitychange，focus 不一定来。
+  if (typeof document !== "undefined") {
+    unsubscribeVisibility = () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+  }
+
   const tick = () => { void sampleOnce(); };
   tick();
   timer = window.setInterval(() => {
@@ -240,6 +385,14 @@ export async function startPerception(): Promise<void> {
     if (!config.enabled) return;
     tick();
   }, Math.max(20, loadPerceptionConfig().sampleSeconds) * 1000);
+}
+
+function onVisibilityChange(): void {
+  if (document.visibilityState === "hidden") {
+    markAwayFromPhone();
+  } else {
+    void markReturnedToPhone();
+  }
 }
 
 /** 停止引擎（关掉总开关时调用）。 */
@@ -252,6 +405,10 @@ export function stopPerception(): void {
   if (unsubscribeForeground) {
     unsubscribeForeground();
     unsubscribeForeground = null;
+  }
+  if (unsubscribeVisibility) {
+    unsubscribeVisibility();
+    unsubscribeVisibility = null;
   }
 }
 

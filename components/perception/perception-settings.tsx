@@ -11,8 +11,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Activity, AlertCircle, BarChart3, Battery, Calendar,
-  MapPin, RefreshCw, ShieldCheck, Smartphone, Trash2, Users, Wifi,
+  Activity, AlertCircle, BarChart3, Battery, Calendar, Cloud,
+  Footprints, MapPin, RefreshCw, ShieldCheck, Smartphone, Trash2, Users, Wifi,
 } from "lucide-react";
 
 import { Toggle } from "@/components/ui/form";
@@ -30,6 +30,9 @@ import {
   type PerceptionConfig,
   type PerceptionLogEntry,
 } from "@/lib/perception";
+import { clearCloudStatus } from "@/lib/perception/cloud-sync";
+import { hasStepPermission, requestStepPermission } from "@/lib/perception/bridge";
+import { describeStatus, filterStatusBySwitches } from "@/lib/perception/describe";
 
 const CAP_ICONS: Record<PerceptionCapability, typeof Battery> = {
   battery: Battery,
@@ -39,6 +42,8 @@ const CAP_ICONS: Record<PerceptionCapability, typeof Battery> = {
   calendar: Calendar,
   contacts: Users,
   usageStats: BarChart3,
+  steps: Footprints,
+  returnToPhone: Activity,
 };
 
 function fmtTime(iso: string): string {
@@ -101,6 +106,12 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
         onNotice?.(`当前 App 版本还不支持「${row.label}」，开启后也不会产生信号`);
       } else if (row?.missingRequirement) {
         onNotice?.(row.missingRequirement);
+      }
+      // 步数要单独的运行时权限：在用户明确打开它的这一刻申请，而不是启动时一股脑要，
+      // 那时用户不知道权限干什么用，拒绝率很高。
+      if (id === "steps" && row?.nativeSupported && !hasStepPermission()) {
+        const immediate = requestStepPermission();
+        onNotice?.(immediate ? "步数已可用" : "请在系统弹窗里允许「身体活动」权限，允许后步数才会生效");
       }
     }
   }, [update, onNotice]);
@@ -298,6 +309,20 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       onChange={e => update({ hourlyLimit: Number(e.target.value) || 12 })}
                     />
                   </div>
+                  <div className="per-field">
+                    <div className="per-field-body">
+                      <div className="per-field-label">电量偏低阈值</div>
+                      <div className="per-field-hint">电量跌到这个百分比以下，事件名就是「电量偏低」（现实桥按它匹配）</div>
+                    </div>
+                    <input
+                      className="per-field-input"
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={config.batteryLowPercent}
+                      onChange={e => update({ batteryLowPercent: Number(e.target.value) || 20 })}
+                    />
+                  </div>
                   <div className="per-field" style={{ alignItems: "center" }}>
                     <div className="per-field-body">
                       <div className="per-field-label">遵守安静时段</div>
@@ -314,6 +339,131 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
               <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
                 想让它变成真正的互动？去「现实桥」新建规则，匹配类型填上面的事件名
                 （如「电量偏低」「充电开始」「长时间使用」），就能让它写进聊天、记忆或通知。
+              </div>
+
+              {/* 回到手机 */}
+              <div>
+                <div className="settings-menu-section-title">回到手机</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">离开后回来说一声</div>
+                      <div className="per-field-hint">你离开小手机一段时间再打开时，产生一条「回到手机」信号</div>
+                    </div>
+                    <Toggle
+                      checked={config.returnSignalEnabled}
+                      onChange={(v: boolean) => update({ returnSignalEnabled: v })}
+                    />
+                  </div>
+                  <div className="per-field">
+                    <div className="per-field-body">
+                      <div className="per-field-label">离开多久才算</div>
+                      <div className="per-field-hint">低于这个时长不算「离开过」，防止切一下别的 App 回来就触发；单位分钟</div>
+                    </div>
+                    <input
+                      className="per-field-input"
+                      type="number"
+                      min={1}
+                      max={720}
+                      value={config.returnAwayMinutes}
+                      onChange={e => update({ returnAwayMinutes: Number(e.target.value) || 5 })}
+                    />
+                  </div>
+                  <div className="per-field">
+                    <div className="per-field-body">
+                      <div className="per-field-label">触发间隔</div>
+                      <div className="per-field-hint">两次信号之间至少隔多久，防止反复切前后台刷屏；单位分钟，0 = 不限制</div>
+                    </div>
+                    <input
+                      className="per-field-input"
+                      type="number"
+                      min={0}
+                      max={720}
+                      value={config.returnCooldownMinutes}
+                      onChange={e => update({ returnCooldownMinutes: Number(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+                <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
+                  这只是产生一个信号，不依赖安卓壳。是否让角色开口、说什么，由「现实桥」里的规则决定。
+                </div>
+              </div>
+
+              {/* 角色怎么看到 */}
+              <div>
+                <div className="settings-menu-section-title">角色怎么看到这些</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">聊天时附带当前状态</div>
+                      <div className="per-field-hint">每轮对话悄悄告诉角色此刻的电量、网络与在用什么应用。更自然，但每轮会多占一点 token</div>
+                    </div>
+                    <Toggle
+                      checked={config.injectStatus}
+                      onChange={(v: boolean) => update({ injectStatus: v })}
+                    />
+                  </div>
+                  <div className="per-field">
+                    <div className="per-field-body">
+                      <div className="per-field-label">主动查看的间隔</div>
+                      <div className="per-field-hint">角色两次「看手机」之间至少隔多久，防止连查；单位分钟，0 = 不限制</div>
+                    </div>
+                    <input
+                      className="per-field-input"
+                      type="number"
+                      min={0}
+                      max={720}
+                      value={config.queryCooldownMinutes}
+                      onChange={e => update({ queryCooldownMinutes: Number(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+                <div className="per-note" style={{ padding: "0 var(--ui-padding, 16px)" }}>
+                  角色想主动查手机，还要单独开能力：工具箱 → 内置能力 → 「查看TA的手机」。
+                </div>
+              </div>
+
+              {/* 云端同步 */}
+              <div>
+                <div className="settings-menu-section-title">离线时也能知道</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="per-field" style={{ alignItems: "center" }}>
+                    <div className="per-field-body">
+                      <div className="per-field-label">同步状态到我的云端</div>
+                      <div className="per-field-hint">角色离线生成消息时看不到你的手机，开启后它能看到你离开前的状态</div>
+                    </div>
+                    <Toggle
+                      checked={config.cloudSyncEnabled}
+                      onChange={(v: boolean) => update({ cloudSyncEnabled: v })}
+                    />
+                  </div>
+                </div>
+                {config.cloudSyncEnabled && (
+                  <div className="per-note is-warn" style={{ margin: "8px var(--ui-padding, 16px) 0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+                      <Cloud size={13} strokeWidth={2.2} /> 开启前请知悉
+                    </div>
+                    <div style={{ marginTop: 6, lineHeight: 1.65 }}>
+                      只上传一行汇总（电量、网络、正在用的应用名、步数），不上传采样流与完整应用列表；
+                      应用只传显示名、不传包名；存进你自己配置的云端，不经第三方；超过 6 小时自动视为过期。
+                    </div>
+                    <div style={{ marginTop: 6 }}>
+                      关闭开关即停止上传；已上传的内容可用下方按钮删掉。
+                    </div>
+                  </div>
+                )}
+                <div className="per-actions" style={{ justifyContent: "flex-start" }}>
+                  <button
+                    type="button"
+                    className="ui-btn ui-btn-outline"
+                    onClick={async () => {
+                      const ok = await clearCloudStatus();
+                      onNotice?.(ok ? "已清除云端感知数据" : "没有可清除的数据，或云端未配置");
+                    }}
+                  >
+                    <Trash2 size={14} strokeWidth={2} /> 清除云端数据
+                  </button>
+                </div>
               </div>
             </>
           ) : (
@@ -372,6 +522,22 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       </div>
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* 角色视角 */}
+              <div>
+                <div className="settings-menu-section-title">角色会看到什么</div>
+                <div className="menu-group" style={{ marginTop: 10 }}>
+                  <div className="menu-item" style={{ cursor: "default", alignItems: "flex-start" }}>
+                    <div className="menu-label-group">
+                      <span className="menu-label">按你当前的开关过滤后</span>
+                      <span className="menu-desc">这段文字就是角色主动查手机时会读到的内容</span>
+                      <div className="per-raw" style={{ margin: "8px 0 0" }}>
+                        {describeStatus(filterStatusBySwitches(diag.status, config)) || "（还没有可读信息）"}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 

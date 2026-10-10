@@ -1,7 +1,8 @@
 // lib/chat-engine.ts
 
 import { createSseJsonParser } from "./sse-json";
-import { maybeAppendShortcutCapability } from "./offline-shortcut-capability";
+import { maybeAppendShortcutCapability, maybeAppendPerceptionStatus } from "./offline-shortcut-capability";
+import { maybeBuildStatusInjection } from "./perception/describe";
 import { loadCharacters } from "./character-storage";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
@@ -2026,6 +2027,15 @@ export async function buildChatPromptMessages(
     }
     appendEmptyGenerateGuardMessage(llmMessages, config, historyForPrompt);
 
+    // ── 感知状态注入（默认关）──
+    // 放在所有系统消息之后、历史之前：让它是「最后一眼背景」，
+    // 又不打断预设精心安排的消息顺序。只在线聊天注入——离线场景由
+    // offline-shortcut-capability 的 maybeAppendPerceptionStatus 负责。
+    if (!isOfflineMode) {
+        const perceptionInjection = maybeBuildStatusInjection();
+        if (perceptionInjection) llmMessages.push({ role: "system", content: perceptionInjection });
+    }
+
     return { llmMessages, character, config, preset, regexes, userIdentity, toolsEnabled };
 }
 
@@ -2620,6 +2630,10 @@ async function generateChatCompletionCore(
         const bailoutMessages = [...llmMessages];
         // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
         maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
+        // 感知状态：同样只在这条（云端接管的）兜底路径注入——本地能生成时
+        // 走不到这里，由 buildChatPromptMessages 负责。注入的是本地渲染好的
+        // 一行文字，随提示词一起上传，云端不需要理解感知系统的内部结构。
+        maybeAppendPerceptionStatus(bailoutMessages);
         void import("./push-bailout-client").then(async mod => {
             const handle = await mod.armReplyBailout({
                 sessionId: session.id,

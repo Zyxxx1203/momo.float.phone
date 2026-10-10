@@ -11,6 +11,8 @@ type PerceptionBridgeLike = {
   getPerceptionSnapshot?: () => string;
   getAppLabel?: (packageName: string) => string;
   getPerceptionCapabilities?: () => string;
+  hasStepPermission?: () => boolean;
+  requestStepPermission?: () => boolean;
 };
 
 function bridge(): PerceptionBridgeLike | null {
@@ -32,6 +34,8 @@ export function supportsAppLabel(): boolean {
 export type DeviceSnapshot = {
   battery: { percent: number; charging: boolean };
   network: { type: string; metered: boolean };
+  /** 当天步数；-1 = 原生不支持或未授权（老 APK / 未开活动识别权限） */
+  steps: number;
 };
 
 /** 取设备快照。失败返回 null（调用方按「本轮跳过」处理）。 */
@@ -50,10 +54,40 @@ export function readPerceptionSnapshot(): DeviceSnapshot | null {
         type: String(parsed.network?.type ?? "none"),
         metered: parsed.network?.metered !== false,
       },
+      steps: Number.isFinite(Number(parsed.steps)) ? Number(parsed.steps) : -1,
     };
   } catch {
     return null;
   }
+}
+
+/** 步数所需的「活动识别」权限是否已授予（老壳不支持该接口时返回 false）。 */
+export function hasStepPermission(): boolean {
+  try {
+    return bridge()?.hasStepPermission?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 申请活动识别权限（步数）。
+ *
+ * 返回 true 表示「现在就可以用了」（已授权或系统不需要），false 表示弹出了系统
+ * 对话框、结果要稍后由 hasStepPermission() 轮询确认——申请是异步的，
+ * 不能同步拿到结果。老壳没有这个接口时同样返回 false 并提示需更新。
+ */
+export function requestStepPermission(): boolean {
+  try {
+    return bridge()?.requestStepPermission?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 壳是否提供步数权限申请接口（老 APK 没有）。 */
+export function supportsStepPermission(): boolean {
+  return typeof bridge()?.requestStepPermission === "function";
 }
 
 /** 包名 → 应用显示名。失败返回空串，调用方退回显示包名。 */

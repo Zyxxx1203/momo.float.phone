@@ -23,7 +23,16 @@ import {
 } from "./tool-storage";
 import { executeCustomAppToolCall } from "./custom-app-tool-runtime";
 import { characterWorkspace, agentComputerRequest, isAgentComputerConfigured } from "./agent-computer";
-import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import { AGENT_COMPUTER_CAPABILITY_ID, CALENDAR_MANAGEMENT_CAPABILITY_ID, LOCAL_DATA_LIBRARY_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MUSIC_CONTROL_CAPABILITY_ID, NOTE_WALL_CAPABILITY_ID, PERCEPTION_READ_CAPABILITY_ID, REALITY_BRIDGE_CAPABILITY_ID, SEND_FILE_CAPABILITY_ID, TIMED_WAKE_CAPABILITY_ID, TOOLBOX_MANAGEMENT_CAPABILITY_ID, getInternalCapability } from "./internal-capability-storage";
+import {
+    checkQueryCooldown,
+    describeStatusByFocus,
+    filterStatusBySwitches,
+    hasPerceptionBridge,
+    loadPerceptionConfig,
+    loadPerceptionStatus,
+    markQueryPerformed,
+} from "./perception";
 import { bridgeConnection, loadBridgeDataItems, loadBridgeShortcutActions, readAllBridgeStateSnapshots, readBridgeStateSnapshot } from "./reality-bridge/storage";
 import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand } from "./shortcut-command-client";
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
@@ -791,6 +800,7 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     if (call.name === "发送文件") return executeSendFileTool(call);
     if (call.name === "角色电脑") return executeAgentComputerTool(call, context);
     if (isRealityBridgeToolName(call.name)) return executeRealityBridgeTool(call, context);
+    if (call.name === "查看TA的手机") return executePerceptionReadTool(call, context);
     if (call.name === "稍后主动联系" || call.name === "设置定时醒来") return executeTimedWakeTool(call, context);
 
     if (call.name !== "写入记忆") return null;
@@ -808,6 +818,58 @@ async function executeInternalTool(call: ToolCall, context?: ToolExecutionContex
     }
 
     return executeMemoryWriteTool(call.args, capability, context);
+}
+
+/** 角色主动「看一眼」真实手机。只读，绝不改变用户设备上的任何东西。 */
+async function executePerceptionReadTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult> {
+    const capability = getInternalCapability(PERCEPTION_READ_CAPABILITY_ID);
+    if (!capability || !capability.enabled || capability.mode === "off") {
+        return {
+            name: call.name,
+            success: false,
+            error: "「查看TA的手机」能力未启用（工具箱 → 内置能力）",
+            continueConversation: false,
+            persistToHistory: false,
+            userNotice: "查看TA的手机能力未启用",
+        };
+    }
+
+    const config = loadPerceptionConfig();
+    if (!config.enabled) {
+        return { name: call.name, success: false, error: "感知功能未开启（现实桥 → 感应）" };
+    }
+
+    const characterId = context?.characterId || "";
+    const cooldown = checkQueryCooldown(characterId);
+    if (!cooldown.allowed) {
+        // 冷却拦下不报错，而是明确告诉角色「刚看过」——否则模型会以为自己没调用成功、
+        // 立刻重试一次，反而更浪费。剩几秒是让它知道该等多久。
+        return {
+            name: call.name,
+            success: true,
+            data: `你刚刚已经看过 TA 的手机了（${cooldown.remainingSeconds} 秒内不必再看）。`
+                + "用你上次看到的信息继续就好，不要连查。",
+        };
+    }
+
+    const status = loadPerceptionStatus();
+    if (!status.at) {
+        return {
+            name: call.name,
+            success: false,
+            error: hasPerceptionBridge()
+                ? "还没采集到手机状态，稍后再试。"
+                : "当前环境读不到真实手机状态（需要在安卓 App 内，且壳版本支持）。",
+        };
+    }
+
+    const focus = typeof call.args?.focus === "string" ? call.args.focus : "";
+    const text = describeStatusByFocus(filterStatusBySwitches(status, config), focus);
+    if (!text) {
+        return { name: call.name, success: true, data: "现在读不到具体信息（可能相关能力被关掉了）。" };
+    }
+    markQueryPerformed(characterId);
+    return { name: call.name, success: true, data: text, userNotice: "看了看你的手机" };
 }
 
 function isRealityBridgeToolName(name: string): boolean {

@@ -81,8 +81,26 @@ class MainActivity : AppCompatActivity() {
     /** 网页消息通知的自增 id：同一条消息覆盖同一 id 会让新通知顶掉旧的，故逐条递增。 */
     private var webNotifId = 500
 
-    /** 感知桥：把电量/网络/应用名交给网页（边界说明见 PerceptionBridge）。 */
+    /** 感知桥：把电量/网络/应用名/步数交给网页（边界说明见 PerceptionBridge）。 */
     private val perception by lazy { PerceptionBridge(this) }
+
+    /**
+     * 活动识别权限的申请结果回调。
+     *
+     * 权限是网页侧主动申请的（用户在「感知」面板打开步数时），所以这里只把结果
+     * 记下来，由网页轮询 hasStepPermission() 自己决定下一步——壳不替网页做判断，
+     * 与感知桥「只读、零判断」的边界保持一致。
+     */
+    @Volatile
+    private var stepPermissionGranted = false
+
+    private val stepPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        stepPermissionGranted = granted
+        // 刚拿到权限就挂上传感器：下一次采样就能读到值，用户不必重启 App
+        if (granted) PerceptionBridge.attachStepSensor(this)
+    }
 
     /** 拉取远程头像用；超时压短，头像拿不到就退回默认图标，不能拖住通知。 */
     private val avatarClient = OkHttpClient.Builder()
@@ -216,6 +234,9 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
 
         webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        // 步数传感器是异步的（没有同步取值接口），必须提前挂上才有值可读。
+        // 这里只是「挂监听」，不申请权限；没授权时 attachStepSensor 内部会直接返回。
+        PerceptionBridge.attachStepSensor(this)
         // 登记给 ShellBus：浮窗服务/无障碍服务要把事件投回页面，需要这个引用。
         // WebView 只能在主线程访问，投递时由 ShellBus 统一 post 到主线程。
         ShellBus.webView = webView
@@ -490,6 +511,31 @@ class MainActivity : AppCompatActivity() {
         /** 本机支持哪些感知能力，给「感知 → 诊断」面板用。 */
         @JavascriptInterface
         fun getPerceptionCapabilities(): String = perception.capabilitiesJson()
+
+        /** 活动识别权限是否已授予（步数感知的前提）。 */
+        @JavascriptInterface
+        fun hasStepPermission(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+            || ContextCompat.checkSelfPermission(
+                this@MainActivity,
+                Manifest.permission.ACTIVITY_RECOGNITION,
+            ) == PackageManager.PERMISSION_GRANTED
+
+        /**
+         * 申请活动识别权限（步数感知）。
+         *
+         * 由网页在用户明确打开「步数」时调用，不在 App 启动时一股脑申请——
+         * 那时用户还不知道这个权限是干什么用的，拒绝率会很高。
+         * 已经授予或系统版本不需要时直接返回 true。
+         */
+        @JavascriptInterface
+        fun requestStepPermission(): Boolean {
+            if (hasStepPermission()) {
+                PerceptionBridge.attachStepSensor(this@MainActivity)
+                return true
+            }
+            runCatching { stepPermissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION) }
+            return false
+        }
 
         /**
          * 让网页直接发一条真正的系统通知（网页侧封装在 lib/shell-notify.ts）。

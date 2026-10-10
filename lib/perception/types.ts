@@ -19,7 +19,9 @@ export type PerceptionCapability =
   | "location"
   | "calendar"
   | "contacts"
-  | "usageStats";
+  | "usageStats"
+  | "steps"
+  | "returnToPhone";
 
 export const PERCEPTION_CAPABILITY_LABEL: Record<PerceptionCapability, string> = {
   battery: "电量与充电",
@@ -29,6 +31,8 @@ export const PERCEPTION_CAPABILITY_LABEL: Record<PerceptionCapability, string> =
   calendar: "系统日历",
   contacts: "联系人",
   usageStats: "使用统计",
+  steps: "步数",
+  returnToPhone: "回到手机提醒",
 };
 
 export const PERCEPTION_CAPABILITY_DESC: Record<PerceptionCapability, string> = {
@@ -39,6 +43,8 @@ export const PERCEPTION_CAPABILITY_DESC: Record<PerceptionCapability, string> = 
   calendar: "日程开始前提醒。需要读取系统日历。",
   contacts: "来电或消息可识别为具体的人。需要读取联系人。",
   usageStats: "汇总当天各应用使用时长。需要「使用情况访问」权限。",
+  steps: "读取当天步数，作为「在走动 / 宅着」的粗线索。需要活动识别权限。",
+  returnToPhone: "离开一段时间后回到小手机时，给角色一个「TA 回来了」的信号。纯网页实现，无需额外权限。",
 };
 
 export type PerceptionConfig = {
@@ -56,6 +62,20 @@ export type PerceptionConfig = {
   hourlyLimit: number;
   /** 是否遵守推送安静时段（复用已有设置，夜里不打扰）。 */
   respectQuietHours: boolean;
+  /** 电量跌到这个百分比以下才报「电量偏低」。取代原先硬编码的 20。 */
+  batteryLowPercent: number;
+  /** 离开后回到小手机时，是否产生一条「回到手机」信号（配了规则角色才会搭话）。 */
+  returnSignalEnabled: boolean;
+  /** 离开多久才算「离开过」（分钟）。低于此值不计，防止切一下微信回来就触发。 */
+  returnAwayMinutes: number;
+  /** 「回到手机」信号的最小间隔（分钟），防止反复切前后台刷屏。 */
+  returnCooldownMinutes: number;
+  /** 每轮对话前是否把当前设备状态悄悄注入角色上下文。默认关，会占 token。 */
+  injectStatus: boolean;
+  /** 同一角色两次「查看TA的手机」之间的最小间隔（分钟），间隔内直接返回缓存。 */
+  queryCooldownMinutes: number;
+  /** 是否把聚合后的设备快照同步到云端，供角色离线生成时参考。默认关。 */
+  cloudSyncEnabled: boolean;
 };
 
 export const PERCEPTION_DEFAULTS: PerceptionConfig = {
@@ -66,6 +86,13 @@ export const PERCEPTION_DEFAULTS: PerceptionConfig = {
   appDwellMinutes: 20,
   hourlyLimit: 12,
   respectQuietHours: true,
+  batteryLowPercent: 20,
+  returnSignalEnabled: true,
+  returnAwayMinutes: 5,
+  returnCooldownMinutes: 15,
+  injectStatus: false,
+  queryCooldownMinutes: 5,
+  cloudSyncEnabled: false,
 };
 
 export const PERCEPTION_LIMITS = {
@@ -73,6 +100,10 @@ export const PERCEPTION_LIMITS = {
   batteryStepPercent: { min: 1, max: 50 },
   appDwellMinutes: { min: 2, max: 180 },
   hourlyLimit: { min: 1, max: 60 },
+  batteryLowPercent: { min: 1, max: 99 },
+  returnAwayMinutes: { min: 1, max: 720 },
+  returnCooldownMinutes: { min: 0, max: 720 },
+  queryCooldownMinutes: { min: 0, max: 720 },
 } as const;
 
 /** 一条待投递的感知信号。type 直接写成人类可读的事件名，规则里 matchType 就能匹配。 */
@@ -98,6 +129,24 @@ export type PerceptionLogEntry = {
   skipped?: string;
 };
 
+/** 设备状态缓存：引擎每次采样后写入，供「注入 / 主动查询 / 云端同步」三处读取。 */
+export type PerceptionStatusSnapshot = {
+  /** 采集时刻 */
+  at: string;
+  /** 电量百分比，-1 = 未知 */
+  batteryPercent: number;
+  charging: boolean;
+  /** "wifi" | "cellular" | "none" 等 */
+  networkType: string;
+  metered: boolean;
+  /** 当前前台应用显示名（无权限时为空） */
+  foregroundApp: string;
+  /** 该应用已连续使用分钟数，0 = 未知 */
+  foregroundMinutes: number;
+  /** 当天步数，-1 = 未知 */
+  steps: number;
+};
+
 /** 诊断面板用的一次性状态快照。 */
 export type PerceptionDiagnostics = {
   /** 是否在安卓壳内（普通浏览器为 false）。 */
@@ -114,6 +163,8 @@ export type PerceptionDiagnostics = {
   lastSampleAt: string;
   /** 最近一次取值快照（电量/网络原文），故障排查用。 */
   lastSnapshot: string;
+  /** 最近一次采样的可读设备状态（面板展示「角色会看到什么」）。 */
+  status: PerceptionStatusSnapshot;
   /** 本小时已用信号数 / 上限。 */
   hourlyUsed: number;
   hourlyLimit: number;

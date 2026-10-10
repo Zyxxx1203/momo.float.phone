@@ -10,15 +10,18 @@ import {
   type PerceptionCapability,
   type PerceptionConfig,
   type PerceptionLogEntry,
+  type PerceptionStatusSnapshot,
 } from "./types";
 
 const CONFIG_KEY = "ai_phone_perception_config_v1";
 const LOG_KEY = "ai_phone_perception_log_v1";
 const STATE_KEY = "ai_phone_perception_state_v1";
+const STATUS_KEY = "ai_phone_perception_status_v1";
 
 registerKvMigration(CONFIG_KEY);
 registerKvMigration(LOG_KEY);
 registerKvMigration(STATE_KEY);
+registerKvMigration(STATUS_KEY);
 
 const LOG_LIMIT = 60;
 
@@ -42,6 +45,13 @@ export function loadPerceptionConfig(): PerceptionConfig {
       appDwellMinutes: clamp(parsed.appDwellMinutes, PERCEPTION_LIMITS.appDwellMinutes.min, PERCEPTION_LIMITS.appDwellMinutes.max, PERCEPTION_DEFAULTS.appDwellMinutes),
       hourlyLimit: clamp(parsed.hourlyLimit, PERCEPTION_LIMITS.hourlyLimit.min, PERCEPTION_LIMITS.hourlyLimit.max, PERCEPTION_DEFAULTS.hourlyLimit),
       respectQuietHours: parsed.respectQuietHours !== false,
+      batteryLowPercent: clamp(parsed.batteryLowPercent, PERCEPTION_LIMITS.batteryLowPercent.min, PERCEPTION_LIMITS.batteryLowPercent.max, PERCEPTION_DEFAULTS.batteryLowPercent),
+      returnSignalEnabled: parsed.returnSignalEnabled !== false,
+      returnAwayMinutes: clamp(parsed.returnAwayMinutes, PERCEPTION_LIMITS.returnAwayMinutes.min, PERCEPTION_LIMITS.returnAwayMinutes.max, PERCEPTION_DEFAULTS.returnAwayMinutes),
+      returnCooldownMinutes: clamp(parsed.returnCooldownMinutes, PERCEPTION_LIMITS.returnCooldownMinutes.min, PERCEPTION_LIMITS.returnCooldownMinutes.max, PERCEPTION_DEFAULTS.returnCooldownMinutes),
+      injectStatus: parsed.injectStatus === true,
+      queryCooldownMinutes: clamp(parsed.queryCooldownMinutes, PERCEPTION_LIMITS.queryCooldownMinutes.min, PERCEPTION_LIMITS.queryCooldownMinutes.max, PERCEPTION_DEFAULTS.queryCooldownMinutes),
+      cloudSyncEnabled: parsed.cloudSyncEnabled === true,
     };
   } catch {
     return { ...PERCEPTION_DEFAULTS };
@@ -115,6 +125,12 @@ export type PerceptionRuntimeState = {
   lastSnapshot: string;
   /** 无匹配规则的信号计数 */
   unmatchedSignals: number;
+  /** 进入后台（离开小手机）的时刻；0 = 当前在前台 */
+  awaySince: number;
+  /** 上次发「回到手机」信号的时刻，用于回归冷却 */
+  lastReturnSignalAt: number;
+  /** 每个角色上次调用「查看TA的手机」的时刻：characterId → 毫秒 */
+  lastQueryAt: Record<string, number>;
 };
 
 const EMPTY_STATE: PerceptionRuntimeState = {
@@ -129,6 +145,9 @@ const EMPTY_STATE: PerceptionRuntimeState = {
   lastSampleAt: "",
   lastSnapshot: "",
   unmatchedSignals: 0,
+  awaySince: 0,
+  lastReturnSignalAt: 0,
+  lastQueryAt: {},
 };
 
 export function loadPerceptionState(): PerceptionRuntimeState {
@@ -149,4 +168,40 @@ export function savePerceptionState(state: PerceptionRuntimeState): void {
 /** 重置运行态（清空流水时一并调用，让引擎从干净状态重新开始）。 */
 export function resetPerceptionState(): void {
   kvSet(STATE_KEY, JSON.stringify(EMPTY_STATE));
+  kvRemove(STATUS_KEY);
+}
+
+// ── 设备状态缓存 ──
+// 引擎每次采样后把「人类可读的当前状态」存这里。三个消费者：
+//   ① 聊天时按需注入给角色（injectStatus）
+//   ② 角色主动调用「查看TA的手机」
+//   ③ 云端同步（cloudSyncEnabled，默认关）
+// 与运行态分开存：运行态是引擎自己的基准，这里是给外部读的成品，随时可清。
+
+const EMPTY_STATUS: PerceptionStatusSnapshot = {
+  at: "",
+  batteryPercent: -1,
+  charging: false,
+  networkType: "",
+  metered: false,
+  foregroundApp: "",
+  foregroundMinutes: 0,
+  steps: -1,
+};
+
+/** 读最近一次采样的设备状态。从未采样过时 at 为空串。 */
+export function loadPerceptionStatus(): PerceptionStatusSnapshot {
+  try {
+    const raw = kvGet(STATUS_KEY);
+    if (!raw) return { ...EMPTY_STATUS };
+    const parsed = JSON.parse(raw) as Partial<PerceptionStatusSnapshot>;
+    return { ...EMPTY_STATUS, ...parsed };
+  } catch {
+    return { ...EMPTY_STATUS };
+  }
+}
+
+/** 写入设备状态缓存（引擎采样时调用）。 */
+export function savePerceptionStatus(status: PerceptionStatusSnapshot): void {
+  kvSet(STATUS_KEY, JSON.stringify(status));
 }

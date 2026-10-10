@@ -68,15 +68,19 @@ class DeviceActionBridge(private val context: Context) {
      * 用显式 on/off 而不是「切换」：网页与角色的意图可能因为重试而重复送达，
      * 「切换」语义下重试一次就把灯又关回去了（用户看到灯闪一下）。
      */
-    fun setTorch(on: Boolean): JSONObject = try {
+    fun setTorch(on: Boolean): JSONObject {
+        // 用块函数体而不是 `= try { ... }`：表达式体里禁止 return，
+        // 而这里有提前返回的分支（没闪光灯时直接给原因）。
         val cameraId = findTorchCameraId()
             ?: return JSONObject().put("ok", false).put("reason", "这台设备没有可用的闪光灯")
-        val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        cm.setTorchMode(cameraId, on)
-        torchOn = on
-        JSONObject().put("ok", true).put("on", on)
-    } catch (e: Throwable) {
-        JSONObject().put("ok", false).put("reason", e.message ?: "手电筒不可用")
+        return try {
+            val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            cm.setTorchMode(cameraId, on)
+            torchOn = on
+            JSONObject().put("ok", true).put("on", on)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "手电筒不可用")
+        }
     }
 
     /** 当前是不是开着（仅本进程内的记忆，见 companion 注释）。 */
@@ -97,27 +101,29 @@ class DeviceActionBridge(private val context: Context) {
      * 改音量。action: up / down / set / mute；set 用 level（0-100 百分比）。
      * 零权限，任何时候都能做。
      */
-    fun setVolume(streamName: String, action: String, level: Int): JSONObject = try {
+    fun setVolume(streamName: String, action: String, level: Int): JSONObject {
         val stream = streamFor(streamName)
             ?: return JSONObject().put("ok", false).put("reason", "未知的音量类型：$streamName")
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val max = am.getStreamMaxVolume(stream)
-        when (action) {
-            "up" -> am.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
-            "down" -> am.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
-            "mute" -> am.adjustStreamVolume(stream, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
-            "set" -> {
-                val target = (max * level.coerceIn(0, 100) / 100.0).toInt().coerceIn(0, max)
-                am.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
+        return try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val max = am.getStreamMaxVolume(stream)
+            when (action) {
+                "up" -> am.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                "down" -> am.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                "mute" -> am.adjustStreamVolume(stream, AudioManager.ADJUST_MUTE, AudioManager.FLAG_SHOW_UI)
+                "set" -> {
+                    val target = (max * level.coerceIn(0, 100) / 100.0).toInt().coerceIn(0, max)
+                    am.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
+                }
+                else -> return JSONObject().put("ok", false).put("reason", "未知的操作：$action")
             }
-            else -> return JSONObject().put("ok", false).put("reason", "未知的操作：$action")
+            JSONObject()
+                .put("ok", true)
+                .put("current", am.getStreamVolume(stream))
+                .put("max", max)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "音量不可用")
         }
-        JSONObject()
-            .put("ok", true)
-            .put("current", am.getStreamVolume(stream))
-            .put("max", max)
-    } catch (e: Throwable) {
-        JSONObject().put("ok", false).put("reason", e.message ?: "音量不可用")
     }
 
     // ── 屏幕亮度 ──
@@ -134,19 +140,21 @@ class DeviceActionBridge(private val context: Context) {
     }
 
     /** 设屏幕亮度，level 为 0-100 百分比。 */
-    fun setBrightness(level: Int): JSONObject = try {
+    fun setBrightness(level: Int): JSONObject {
         if (!canSetBrightness()) {
             return JSONObject().put("ok", false)
                 .put("reason", "还没有「修改系统设置」权限")
                 .put("needPermission", "write_settings")
         }
-        // 系统的亮度值是 0-255；这里刻意不碰 SCREEN_BRIGHTNESS_MODE（自动亮度），
-        // 改模式会让用户「明明没动过自动亮度却关了」而困惑。
-        val value = (255 * level.coerceIn(1, 100) / 100.0).toInt().coerceIn(1, 255)
-        Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, value)
-        JSONObject().put("ok", true).put("level", level)
-    } catch (e: Throwable) {
-        JSONObject().put("ok", false).put("reason", e.message ?: "亮度不可用")
+        return try {
+            // 系统的亮度值是 0-255；这里刻意不碰 SCREEN_BRIGHTNESS_MODE（自动亮度），
+            // 改模式会让用户「明明没动过自动亮度却关了」而困惑。
+            val value = (255 * level.coerceIn(1, 100) / 100.0).toInt().coerceIn(1, 255)
+            Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, value)
+            JSONObject().put("ok", true).put("level", level)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "亮度不可用")
+        }
     }
 
     // ── 勿扰模式 ──
@@ -166,20 +174,22 @@ class DeviceActionBridge(private val context: Context) {
      * 用 NONE/ALL 这两个最明确的档位，不用 PRIORITY（它依赖用户自己配的
      * 允许名单，行为不可预测，角色说不清到底静音了什么）。
      */
-    fun setDnd(on: Boolean): JSONObject = try {
+    fun setDnd(on: Boolean): JSONObject {
         if (!canSetDnd()) {
             return JSONObject().put("ok", false)
                 .put("reason", "还没有「勿扰模式」访问权限")
                 .put("needPermission", "dnd")
         }
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.setInterruptionFilter(
-            if (on) NotificationManager.INTERRUPTION_FILTER_NONE
-            else NotificationManager.INTERRUPTION_FILTER_ALL,
-        )
-        JSONObject().put("ok", true).put("on", on)
-    } catch (e: Throwable) {
-        JSONObject().put("ok", false).put("reason", e.message ?: "勿扰模式不可用")
+        return try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.setInterruptionFilter(
+                if (on) NotificationManager.INTERRUPTION_FILTER_NONE
+                else NotificationManager.INTERRUPTION_FILTER_ALL,
+            )
+            JSONObject().put("ok", true).put("on", on)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "勿扰模式不可用")
+        }
     }
 
     // ── 打开应用 ──
@@ -190,7 +200,7 @@ class DeviceActionBridge(private val context: Context) {
      * 从后端栈启动（NEW_TASK）：本桥被 WebView 里的 JS 调用时没有 Activity 栈，
      * 不带这个 flag 会直接抛 ActivityNotFoundException。
      */
-    fun openApp(packageName: String): JSONObject = try {
+    fun openApp(packageName: String): JSONObject {
         if (packageName.isBlank()) {
             return JSONObject().put("ok", false).put("reason", "包名不能为空")
         }
@@ -198,11 +208,13 @@ class DeviceActionBridge(private val context: Context) {
         val intent = pm.getLaunchIntentForPackage(packageName)
             ?: return JSONObject().put("ok", false)
                 .put("reason", "找不到可启动的应用（包名不对，或它没有启动界面）")
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-        JSONObject().put("ok", true).put("package", packageName)
-    } catch (e: Throwable) {
-        JSONObject().put("ok", false).put("reason", e.message ?: "无法打开应用")
+        return try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            JSONObject().put("ok", true).put("package", packageName)
+        } catch (e: Throwable) {
+            JSONObject().put("ok", false).put("reason", e.message ?: "无法打开应用")
+        }
     }
 
     /**
@@ -210,21 +222,23 @@ class DeviceActionBridge(private val context: Context) {
      * 角色多半说「打开微信」，而不知道 com.tencent.mm。
      * 返回空串表示没找到（调用方如实说找不到，不要猜一个包名去启动）。
      */
-    fun findPackageByLabel(label: String): String = try {
+    fun findPackageByLabel(label: String): String {
         if (label.isBlank()) return ""
-        val pm = context.packageManager
-        val target = label.trim()
-        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        // 先精确匹配，再退化到包含匹配——避免「微信」误命中「微信读书」。
-        val exact = apps.firstOrNull { pm.getApplicationLabel(it).toString() == target }
-        if (exact != null) return exact.packageName
-        val fuzzy = apps.firstOrNull {
-            val name = pm.getApplicationLabel(it).toString()
-            name.contains(target, ignoreCase = true)
+        return try {
+            val pm = context.packageManager
+            val target = label.trim()
+            val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            // 先精确匹配，再退化到包含匹配——避免「微信」误命中「微信读书」。
+            val exact = apps.firstOrNull { pm.getApplicationLabel(it).toString() == target }
+            if (exact != null) return exact.packageName
+            val fuzzy = apps.firstOrNull {
+                val name = pm.getApplicationLabel(it).toString()
+                name.contains(target, ignoreCase = true)
+            }
+            fuzzy?.packageName ?: ""
+        } catch (e: Throwable) {
+            ""
         }
-        fuzzy?.packageName ?: ""
-    } catch (e: Throwable) {
-        ""
     }
 
     // ── 打开系统设置页（引导用户授权用）──
@@ -233,7 +247,7 @@ class DeviceActionBridge(private val context: Context) {
      * 跳系统的授权页。由网页在用户点「去授权」时调用，壳不主动跳。
      * 返回是否成功跳转（跳不动时网页可给一句手动路径提示）。
      */
-    fun openSystemSettings(which: String): Boolean = try {
+    fun openSystemSettings(which: String): Boolean {
         val intent = when (which) {
             "write_settings" -> Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
                 .setData(Uri.parse("package:${context.packageName}"))
@@ -244,11 +258,13 @@ class DeviceActionBridge(private val context: Context) {
                 .setData(Uri.parse("package:${context.packageName}"))
             else -> return false
         }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-        true
-    } catch (e: Throwable) {
-        false
+        return try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            true
+        } catch (e: Throwable) {
+            false
+        }
     }
 
     /**
